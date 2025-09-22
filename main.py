@@ -286,10 +286,18 @@ def add_category(name: str):
 
 def rename_category(cat_id: int, new_name: str):
     new_name = new_name.strip()
-    if not new_name: return
+    if not new_name:
+        return False
     conn = db_connect(); cur = conn.cursor()
-    cur.execute("UPDATE categories SET name=? WHERE id=?", (new_name, cat_id))
-    conn.commit(); conn.close()
+    try:
+        cur.execute("UPDATE categories SET name=? WHERE id=?", (new_name, cat_id))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        return exc
+    finally:
+        conn.close()
 
 def delete_category(cat_id: int):
     conn = db_connect(); cur = conn.cursor()
@@ -311,10 +319,18 @@ def add_brand(category_id: int, name: str):
 
 def rename_brand(brand_id: int, new_name: str):
     new_name = new_name.strip()
-    if not new_name: return
+    if not new_name:
+        return False
     conn = db_connect(); cur = conn.cursor()
-    cur.execute("UPDATE brands SET name=? WHERE id=?", (new_name, brand_id))
-    conn.commit(); conn.close()
+    try:
+        cur.execute("UPDATE brands SET name=? WHERE id=?", (new_name, brand_id))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        return exc
+    finally:
+        conn.close()
 
 def delete_brand(brand_id: int):
     conn = db_connect(); cur = conn.cursor()
@@ -336,10 +352,18 @@ def add_model(brand_id: int, name: str):
 
 def rename_model(model_id: int, new_name: str):
     new_name = new_name.strip()
-    if not new_name: return
+    if not new_name:
+        return False
     conn = db_connect(); cur = conn.cursor()
-    cur.execute("UPDATE models SET name=? WHERE id=?", (new_name, model_id))
-    conn.commit(); conn.close()
+    try:
+        cur.execute("UPDATE models SET name=? WHERE id=?", (new_name, model_id))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        return exc
+    finally:
+        conn.close()
 
 def delete_model(model_id: int):
     conn = db_connect(); cur = conn.cursor()
@@ -957,29 +981,40 @@ class App(ctk.CTk):
     def _apply_tree_rename(self, kind, iid, new_value):
         if kind == "cat":
             cat_id = int(iid.split("_")[1])
-            rename_category(cat_id, new_value)
+            result = rename_category(cat_id, new_value)
+            if result is not True:
+                if isinstance(result, sqlite3.IntegrityError):
+                    show_error("Категорія з такою назвою вже існує.")
+                else:
+                    show_error("Не вдалося перейменувати категорію.")
             self._refresh_categories()
             self.after(10, lambda: self._restore_tree_selection("cat", f"cat_{cat_id}"))
         elif kind == "brand":
             brand_id = int(iid.split("_")[1])
-            if not self.current_category_id:
-                rename_brand(brand_id, new_value)
+            result = rename_brand(brand_id, new_value)
+            if result is not True:
+                if isinstance(result, sqlite3.IntegrityError):
+                    show_error("Бренд з такою назвою вже існує.")
+                else:
+                    show_error("Не вдалося перейменувати бренд.")
+            if self.current_category_id:
+                self._refresh_brands(self.current_category_id)
+            else:
                 self._refresh_brands(None)
-                self._reload_gen_tree()
-                return
-            rename_brand(brand_id, new_value)
-            self._refresh_brands(self.current_category_id)
             self._reload_gen_tree()
             self.after(10, lambda: self._restore_tree_selection("brand", f"brand_{brand_id}"))
         else:
             model_id = int(iid.split("_")[1])
-            if not self.current_brand_id:
-                rename_model(model_id, new_value)
+            result = rename_model(model_id, new_value)
+            if result is not True:
+                if isinstance(result, sqlite3.IntegrityError):
+                    show_error("Модель з такою назвою вже існує.")
+                else:
+                    show_error("Не вдалося перейменувати модель.")
+            if self.current_brand_id:
+                self._refresh_models(self.current_brand_id)
+            else:
                 self._refresh_models(None)
-                self._reload_gen_tree()
-                return
-            rename_model(model_id, new_value)
-            self._refresh_models(self.current_brand_id)
             self._reload_gen_tree()
             self.after(10, lambda: self._restore_tree_selection("model", f"model_{model_id}"))
 
@@ -1054,7 +1089,16 @@ class App(ctk.CTk):
         if not self.current_category_id: return show_error("Виберіть категорію.")
         name = self.cat_entry.get().strip()
         if not name: return show_error("Введіть нову назву категорії.")
-        rename_category(self.current_category_id, name); self._refresh_categories()
+        cat_id = self.current_category_id
+        result = rename_category(cat_id, name)
+        if result is not True:
+            if isinstance(result, sqlite3.IntegrityError):
+                show_error("Категорія з такою назвою вже існує.")
+            else:
+                show_error("Не вдалося перейменувати категорію.")
+        self._refresh_categories()
+        if cat_id:
+            self.after(10, lambda: self._restore_tree_selection("cat", f"cat_{cat_id}"))
 
     def _cat_delete(self):
         selection = list(self.cat_tree.selection())
@@ -1087,7 +1131,16 @@ class App(ctk.CTk):
         if not self.current_brand_id: return show_error("Виберіть бренд.")
         name = self.brand_entry.get().strip()
         if not name: return show_error("Введіть нову назву бренду.")
-        rename_brand(self.current_brand_id, name); self._refresh_brands(self.current_category_id)
+        brand_id = self.current_brand_id
+        result = rename_brand(brand_id, name)
+        if result is not True:
+            if isinstance(result, sqlite3.IntegrityError):
+                show_error("Бренд з такою назвою вже існує.")
+            else:
+                show_error("Не вдалося перейменувати бренд.")
+        self._refresh_brands(self.current_category_id)
+        if brand_id:
+            self.after(10, lambda: self._restore_tree_selection("brand", f"brand_{brand_id}"))
         self._reload_gen_tree()
 
     def _brand_delete(self):
@@ -1125,7 +1178,14 @@ class App(ctk.CTk):
         model_id = int(sel[0].split("_")[1])
         name = self.model_entry.get().strip()
         if not name: return show_error("Введіть нову назву моделі.")
-        rename_model(model_id, name); self._refresh_models(self.current_brand_id)
+        result = rename_model(model_id, name)
+        if result is not True:
+            if isinstance(result, sqlite3.IntegrityError):
+                show_error("Модель з такою назвою вже існує.")
+            else:
+                show_error("Не вдалося перейменувати модель.")
+        self._refresh_models(self.current_brand_id)
+        self.after(10, lambda: self._restore_tree_selection("model", f"model_{model_id}"))
         self._reload_gen_tree()
 
     def _model_delete(self):
