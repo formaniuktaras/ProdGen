@@ -10,12 +10,12 @@ from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 import pandas as pd
-from jinja2 import Template
+from jinja2 import Template, TemplateError
 
 APP_TITLE = "Prom Generator"
 DB_FILE = "catalog.db"
 TEMPLATES_FILE = "templates.json"
-SPECS_FILE = "specs.json"
+EXPORT_FIELDS_FILE = "export_fields.json"
 TITLE_TAGS_FILE = "title_tags_templates.json"
 FILM_TYPE_DEFAULT_LABEL = "Універсальний шаблон"
 
@@ -50,6 +50,65 @@ DEFAULT_TEMPLATES = {
         {"name": "anti-blue", "enabled": True}
     ]
 }
+
+DEFAULT_EXPORT_FIELDS = [
+    {"field": "Категорія", "enabled": True, "template": "{{ category }}"},
+    {"field": "Бренд", "enabled": True, "template": "{{ brand }}"},
+    {"field": "Модель", "enabled": True, "template": "{{ model }}"},
+    {"field": "Тип_плівки", "enabled": True, "template": "{{ film_type }}"},
+    {"field": "Назва_позиції", "enabled": True, "template": "{{ title }}"},
+    {"field": "Назва_позиції_укр", "enabled": False, "template": "{{ title }}"},
+    {"field": "Пошукові_запити", "enabled": True, "template": "{{ tags }}"},
+    {"field": "Пошукові_запити_укр", "enabled": False, "template": "{{ tags }}"},
+    {"field": "Опис", "enabled": True, "template": "{{ description }}"},
+    {"field": "Опис_укр", "enabled": False, "template": "{{ description }}"},
+    {"field": "Код_товару", "enabled": False, "template": "{{ spec('Код_товару') }}"},
+    {"field": "Тип_товару", "enabled": False, "template": "{{ film_type }}"},
+    {"field": "Ціна", "enabled": False, "template": ""},
+    {"field": "Валюта", "enabled": False, "template": ""},
+    {"field": "Одиниця_виміру", "enabled": False, "template": ""},
+    {"field": "Мінімальний_обсяг_замовлення", "enabled": False, "template": ""},
+    {"field": "Оптова_ціна", "enabled": False, "template": ""},
+    {"field": "Мінімальне_замовлення_опт", "enabled": False, "template": ""},
+    {"field": "Посилання_зображення", "enabled": False, "template": ""},
+    {"field": "Наявність", "enabled": False, "template": ""},
+    {"field": "Кількість", "enabled": False, "template": ""},
+    {"field": "Номер_групи", "enabled": False, "template": "{{ category_id }}"},
+    {"field": "Назва_групи", "enabled": False, "template": "{{ category }}"},
+    {"field": "Посилання_підрозділу", "enabled": False, "template": ""},
+    {"field": "Можливість_поставки", "enabled": False, "template": ""},
+    {"field": "Термін_поставки", "enabled": False, "template": ""},
+    {"field": "Спосіб_пакування", "enabled": False, "template": ""},
+    {"field": "Спосіб_пакування_укр", "enabled": False, "template": ""},
+    {"field": "Унікальний_ідентифікатор", "enabled": False, "template": ""},
+    {"field": "Ідентифікатор_товару", "enabled": False, "template": "{{ model_id }}"},
+    {"field": "Ідентифікатор_підрозділу", "enabled": False, "template": ""},
+    {"field": "Ідентифікатор_групи", "enabled": False, "template": "{{ category_id }}"},
+    {"field": "Виробник", "enabled": False, "template": "{{ brand }}"},
+    {"field": "Країна_виробник", "enabled": False, "template": ""},
+    {"field": "Знижка", "enabled": False, "template": ""},
+    {"field": "ID_групи_різновидів", "enabled": False, "template": ""},
+    {"field": "Особисті_нотатки", "enabled": False, "template": ""},
+    {"field": "Продукт_на_сайті", "enabled": False, "template": ""},
+    {"field": "Термін_дії_знижки_від", "enabled": False, "template": ""},
+    {"field": "Термін_дії_знижки_до", "enabled": False, "template": ""},
+    {"field": "Ціна_від", "enabled": False, "template": ""},
+    {"field": "Ярлик", "enabled": False, "template": ""},
+    {"field": "HTML_заголовок", "enabled": False, "template": "{{ title }}"},
+    {"field": "HTML_заголовок_укр", "enabled": False, "template": "{{ title }}"},
+    {"field": "HTML_опис", "enabled": False, "template": "{{ description }}"},
+    {"field": "HTML_опис_укр", "enabled": False, "template": "{{ description }}"},
+    {"field": "Код_маркування_(GTIN)", "enabled": False, "template": ""},
+    {"field": "Номер_пристрою_(MPN)", "enabled": False, "template": ""},
+    {"field": "Вага,кг", "enabled": False, "template": "{{ spec('Вага, кг') }}"},
+    {"field": "Ширина,см", "enabled": False, "template": "{{ spec('Ширина, см') }}"},
+    {"field": "Висота,см", "enabled": False, "template": "{{ spec('Висота, см') }}"},
+    {"field": "Довжина,см", "enabled": False, "template": "{{ spec('Довжина, см') }}"},
+    {"field": "Де_знаходиться_товар", "enabled": False, "template": ""},
+    {"field": "Назва_Характеристики", "enabled": False, "template": "{{ spec_items | map(attribute=0) | join('; ') }}"},
+    {"field": "Одиниця_виміру,_Характеристики", "enabled": False, "template": ""},
+    {"field": "Значення_Характеристики", "enabled": False, "template": "{{ spec_items | map(attribute=1) | join('; ') }}"},
+]
 
 def _title_tags_block(title: str, tags: str) -> dict:
     return {
@@ -141,6 +200,87 @@ def resolve_title_tags(title_tags_templates: dict, templates: dict, film_type: s
         or fallback_tags
     )
     return title_template, tags_template
+
+
+def load_export_fields():
+    if not os.path.exists(EXPORT_FIELDS_FILE):
+        fields = [field.copy() for field in DEFAULT_EXPORT_FIELDS]
+        save_export_fields(fields)
+        return fields
+
+    try:
+        with open(EXPORT_FIELDS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        fields = [field.copy() for field in DEFAULT_EXPORT_FIELDS]
+        save_export_fields(fields)
+        return fields
+
+    if not isinstance(data, list):
+        fields = [field.copy() for field in DEFAULT_EXPORT_FIELDS]
+        save_export_fields(fields)
+        return fields
+
+    normalized = []
+    changed = False
+    for item in data:
+        if not isinstance(item, dict):
+            changed = True
+            continue
+        field_name = item.get("field") or item.get("name") or item.get("key")
+        if field_name is None:
+            changed = True
+            continue
+        field_name = str(field_name).strip()
+        if not field_name:
+            changed = True
+            continue
+        template = item.get("template", "")
+        if template is None:
+            template = ""
+        template = str(template)
+        enabled = bool(item.get("enabled", False))
+        normalized.append({"field": field_name, "template": template, "enabled": enabled})
+        if (
+            field_name != item.get("field")
+            or template != (item.get("template", "") or "")
+            or enabled != bool(item.get("enabled", False))
+        ):
+            changed = True
+
+    if not normalized:
+        normalized = [field.copy() for field in DEFAULT_EXPORT_FIELDS]
+        save_export_fields(normalized)
+        return normalized
+
+    if changed:
+        save_export_fields(normalized)
+
+    return normalized
+
+
+def save_export_fields(fields: list):
+    sanitized = []
+    for item in fields:
+        if not isinstance(item, dict):
+            continue
+        field_name = item.get("field") or item.get("name") or item.get("key")
+        if field_name is None:
+            continue
+        field_name = str(field_name).strip()
+        if not field_name:
+            continue
+        template = item.get("template", "")
+        if template is None:
+            template = ""
+        template = str(template)
+        enabled = bool(item.get("enabled", False))
+        sanitized.append({"field": field_name, "template": template, "enabled": enabled})
+
+    with open(EXPORT_FIELDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(sanitized, f, ensure_ascii=False, indent=2)
+
+    return sanitized
 
 # ============================ УТИЛІТИ ============================
 
@@ -286,10 +426,18 @@ def add_category(name: str):
 
 def rename_category(cat_id: int, new_name: str):
     new_name = new_name.strip()
-    if not new_name: return
+    if not new_name:
+        return False
     conn = db_connect(); cur = conn.cursor()
-    cur.execute("UPDATE categories SET name=? WHERE id=?", (new_name, cat_id))
-    conn.commit(); conn.close()
+    try:
+        cur.execute("UPDATE categories SET name=? WHERE id=?", (new_name, cat_id))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        return exc
+    finally:
+        conn.close()
 
 def delete_category(cat_id: int):
     conn = db_connect(); cur = conn.cursor()
@@ -311,10 +459,18 @@ def add_brand(category_id: int, name: str):
 
 def rename_brand(brand_id: int, new_name: str):
     new_name = new_name.strip()
-    if not new_name: return
+    if not new_name:
+        return False
     conn = db_connect(); cur = conn.cursor()
-    cur.execute("UPDATE brands SET name=? WHERE id=?", (new_name, brand_id))
-    conn.commit(); conn.close()
+    try:
+        cur.execute("UPDATE brands SET name=? WHERE id=?", (new_name, brand_id))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        return exc
+    finally:
+        conn.close()
 
 def delete_brand(brand_id: int):
     conn = db_connect(); cur = conn.cursor()
@@ -336,10 +492,18 @@ def add_model(brand_id: int, name: str):
 
 def rename_model(model_id: int, new_name: str):
     new_name = new_name.strip()
-    if not new_name: return
+    if not new_name:
+        return False
     conn = db_connect(); cur = conn.cursor()
-    cur.execute("UPDATE models SET name=? WHERE id=?", (new_name, model_id))
-    conn.commit(); conn.close()
+    try:
+        cur.execute("UPDATE models SET name=? WHERE id=?", (new_name, model_id))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        return exc
+    finally:
+        conn.close()
 
 def delete_model(model_id: int):
     conn = db_connect(); cur = conn.cursor()
@@ -361,7 +525,6 @@ def insert_spec(model_id: int, key: str, value: str):
     cur.execute("INSERT INTO model_specs(model_id, key, value) VALUES(?,?,?)",
                 (model_id, key, value))
     conn.commit(); conn.close()
-    export_specs_json()
 
 def update_spec(spec_id: int, key: str, value: str):
     key = key.strip()
@@ -370,31 +533,50 @@ def update_spec(spec_id: int, key: str, value: str):
     cur.execute("UPDATE model_specs SET key=?, value=? WHERE id=?",
                 (key, value, spec_id))
     conn.commit(); conn.close()
-    export_specs_json()
 
 def delete_spec(spec_id: int):
     conn = db_connect(); cur = conn.cursor()
     cur.execute("DELETE FROM model_specs WHERE id=?", (spec_id,))
     conn.commit(); conn.close()
-    export_specs_json()
 
-def export_specs_json():
-    """Експорт усіх характеристик у переносимий SPECS_FILE."""
+def load_specs_map(model_ids):
+    if not model_ids:
+        return {}
+    unique_ids = []
+    seen = set()
+    for mid in model_ids:
+        try:
+            ivalue = int(mid)
+        except (TypeError, ValueError):
+            continue
+        if ivalue in seen:
+            continue
+        seen.add(ivalue)
+        unique_ids.append(ivalue)
+    if not unique_ids:
+        return {}
+
+    placeholders = ",".join(["?"] * len(unique_ids))
+    query = f"""
+        SELECT model_id, key, value
+        FROM model_specs
+        WHERE model_id IN ({placeholders})
+        ORDER BY model_id, id
+    """
     conn = db_connect(); cur = conn.cursor()
-    cur.execute("""
-        SELECT m.name, s.key, s.value
-        FROM model_specs s
-        JOIN models m ON s.model_id = m.id
-        ORDER BY m.name, s.id
-    """)
+    cur.execute(query, tuple(unique_ids))
     rows = cur.fetchall(); conn.close()
-    data = {}
-    for model, key, value in rows:
-        if isinstance(model, str):
-            model = model.strip()
-        data.setdefault(model, {})[key] = value
-    with open(SPECS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    specs_map = {}
+    for model_id, key, value in rows:
+        if isinstance(key, str):
+            key = key.strip()
+        if isinstance(value, str):
+            value = value.strip()
+        if not key:
+            continue
+        specs_map.setdefault(model_id, {})[key] = value
+    return specs_map
 
 # ============================ ГЕНЕРАЦІЯ ============================
 
@@ -427,7 +609,7 @@ def collect_models(category_ids=None, brand_ids=None, model_ids=None):
     
     conn = db_connect(); cur = conn.cursor()
     query = """
-        SELECT b.name, m.name, c.name, m.id
+        SELECT b.name, m.name, c.name, m.id, b.id, c.id
         FROM models m
         JOIN brands b ON m.brand_id = b.id
         JOIN categories c ON b.category_id = c.id
@@ -452,85 +634,176 @@ def collect_models(category_ids=None, brand_ids=None, model_ids=None):
     cur.execute(query, tuple(params))
     rows = cur.fetchall(); conn.close()
     cleaned = []
-    for brand, model, cat, mid in rows:
+    for brand, model, cat, mid, brand_id, cat_id in rows:
         if isinstance(brand, str):
             brand = brand.strip()
         if isinstance(model, str):
             model = model.strip()
         if isinstance(cat, str):
             cat = cat.strip()
-        cleaned.append((brand, model, cat, mid))
+        cleaned.append((brand, model, cat, mid, brand_id, cat_id))
     return cleaned
-def generate_dataset(film_types: list, templates: dict, title_tags_templates: dict,
-                     category_ids=None, brand_ids=None, model_ids=None):
+def generate_export_rows(
+    film_types: list,
+    templates: dict,
+    title_tags_templates: dict,
+    export_fields: list,
+    category_ids=None,
+    brand_ids=None,
+    model_ids=None,
+):
     pairs = collect_models(category_ids=category_ids, brand_ids=brand_ids, model_ids=model_ids)
+    if not pairs:
+        return [], []
 
-    records = []
+    enabled_fields = []
+    for field in export_fields:
+        if not isinstance(field, dict):
+            continue
+        name = field.get("field") or field.get("name") or field.get("key")
+        if name is None:
+            continue
+        name = str(name).strip()
+        if not name or not field.get("enabled"):
+            continue
+        template_str = field.get("template", "")
+        if template_str is None:
+            template_str = ""
+        enabled_fields.append({"field": name, "template": str(template_str)})
+
+    if not enabled_fields:
+        raise ValueError("Увімкніть хоча б одне поле експорту.")
+
+    specs_map = load_specs_map([mid for _brand, _model, _cat, mid, _bid, _cid in pairs])
     title_tags_cache = {}
-    for brand, model, cat, _mid in pairs:
-        # блок описів для категорії
-        cat_desc_block = templates.get("descriptions", {}).get(cat, {})
+    desc_template_cache = {}
+    field_template_cache = {}
+    rows = []
+    now_value = datetime.now()
+
+    column_order = [field["field"] for field in enabled_fields]
+
+    descriptions = templates.get("descriptions", {})
+
+    for brand, model, cat, mid, brand_id, cat_id in pairs:
+        specs = specs_map.get(mid, {})
+        if not isinstance(specs, dict):
+            specs = {}
+        spec_items = list(specs.items())
+
+        def spec_lookup(key, default=""):
+            return specs.get(key, default)
+
+        cat_desc_block = descriptions.get(cat, {}) if isinstance(descriptions, dict) else {}
         for f in film_types:
-            if f not in title_tags_cache:
-                title_tpl_str, tags_tpl_str = resolve_title_tags(title_tags_templates, templates, f)
-                title_tags_cache[f] = (Template(title_tpl_str), Template(tags_tpl_str))
-            title_t, tags_t = title_tags_cache[f]
-            desc_template_str = cat_desc_block.get(f, cat_desc_block.get("default", "Плівка для {{ brand }} {{ model }}"))
-            desc_t = Template(desc_template_str)
+            film_type = f if isinstance(f, str) else str(f)
+            if film_type not in title_tags_cache:
+                title_tpl_str, tags_tpl_str = resolve_title_tags(title_tags_templates, templates, film_type)
+                try:
+                    title_tpl = Template(title_tpl_str)
+                    tags_tpl = Template(tags_tpl_str)
+                except TemplateError as exc:
+                    raise ValueError(
+                        f"Помилка в шаблонах заголовку/тегів для типу \"{film_type}\": {exc}"
+                    ) from exc
+                title_tags_cache[film_type] = (title_tpl, tags_tpl)
+            title_t, tags_t = title_tags_cache[film_type]
+            try:
+                title_value = title_t.render(film_type=film_type, brand=brand, model=model, category=cat)
+                tags_value = tags_t.render(film_type=film_type, brand=brand, model=model, category=cat)
+            except TemplateError as exc:
+                raise ValueError(
+                    f"Не вдалося згенерувати заголовок або теги для типу \"{film_type}\": {exc}"
+                ) from exc
 
-            records.append({
-                "Категорія": cat,
-                "Бренд": brand,
-                "Модель": model,
-                "Тип плівки": f,
-                "Назва": title_t.render(film_type=f, brand=brand, model=model),
-                "Опис": desc_t.render(film_type=f, brand=brand, model=model),
-                "Теги": tags_t.render(film_type=f, brand=brand, model=model)
-            })
-    return records
+            desc_key = (cat, film_type)
+            desc_tpl = desc_template_cache.get(desc_key)
+            if desc_tpl is None:
+                desc_template_str = cat_desc_block.get(film_type)
+                if desc_template_str is None:
+                    desc_template_str = cat_desc_block.get("default")
+                if desc_template_str is None:
+                    desc_template_str = "Плівка для {{ brand }} {{ model }}"
+                try:
+                    desc_tpl = Template(desc_template_str)
+                except TemplateError as exc:
+                    raise ValueError(
+                        f"Помилка в шаблоні опису для категорії \"{cat}\" і типу \"{film_type}\": {exc}"
+                    ) from exc
+                desc_template_cache[desc_key] = desc_tpl
+            try:
+                desc_value = desc_tpl.render(film_type=film_type, brand=brand, model=model, category=cat)
+            except TemplateError as exc:
+                raise ValueError(
+                    f"Не вдалося сформувати опис для категорії \"{cat}\" і типу \"{film_type}\": {exc}"
+                ) from exc
 
-def export_products_and_specs(records: list, fmt: str, folder: str):
+            context = {
+                "brand": brand,
+                "brand_id": brand_id,
+                "model": model,
+                "model_id": mid,
+                "category": cat,
+                "category_id": cat_id,
+                "film_type": film_type,
+                "title": title_value,
+                "description": desc_value,
+                "tags": tags_value,
+                "specs": specs,
+                "spec_items": spec_items,
+                "spec": spec_lookup,
+                "row_number": len(rows) + 1,
+                "now": now_value,
+            }
+
+            record = {}
+            for field in enabled_fields:
+                field_name = field["field"]
+                tpl_str = field.get("template", "")
+                if tpl_str:
+                    tpl = field_template_cache.get(tpl_str)
+                    if tpl is None:
+                        try:
+                            tpl = Template(tpl_str)
+                        except TemplateError as exc:
+                            raise ValueError(
+                                f"Помилка в шаблоні поля \"{field_name}\": {exc}"
+                            ) from exc
+                        field_template_cache[tpl_str] = tpl
+                    try:
+                        value = tpl.render(**context)
+                    except TemplateError as exc:
+                        raise ValueError(
+                            f"Не вдалося згенерувати значення поля \"{field_name}\": {exc}"
+                        ) from exc
+                else:
+                    value = context.get(field_name, "")
+                if value is None:
+                    value = ""
+                elif not isinstance(value, str):
+                    value = str(value)
+                record[field_name] = value
+            rows.append(record)
+
+    return rows, column_order
+
+def export_products(records: list, columns: list, fmt: str, folder: str):
     ensure_folder(folder)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     base = os.path.join(folder, f"products_{ts}")
 
-    # ТОВАРИ
     if fmt == "Excel (.xlsx)":
         out_products = base + ".xlsx"
-        pd.DataFrame.from_records(records).to_excel(out_products, index=False)
+        pd.DataFrame.from_records(records, columns=columns).to_excel(out_products, index=False)
     elif fmt == "CSV (.csv)":
         out_products = base + ".csv"
-        pd.DataFrame.from_records(records).to_csv(out_products, index=False, encoding="utf-8-sig")
+        pd.DataFrame.from_records(records, columns=columns).to_csv(out_products, index=False, encoding="utf-8-sig")
     else:
         out_products = base + ".json"
         with open(out_products, "w", encoding="utf-8") as f:
             json.dump(records, f, ensure_ascii=False, indent=2)
 
-    # ХАРАКТЕРИСТИКИ → окремий Excel/CSV/JSON з трьома колонками
-    conn = db_connect(); cur = conn.cursor()
-    cur.execute("""
-        SELECT m.name AS model, s.key, s.value
-        FROM model_specs s
-        JOIN models m ON s.model_id = m.id
-        ORDER BY m.name, s.id
-    """)
-    specs_rows = cur.fetchall(); conn.close()
-
-    out_specs = None
-    if specs_rows:
-        df_specs = pd.DataFrame(specs_rows, columns=["Модель", "Характеристика", "Значення"])
-        if fmt == "Excel (.xlsx)":
-            out_specs = base + "_specs.xlsx"
-            df_specs.to_excel(out_specs, index=False)
-        elif fmt == "CSV (.csv)":
-            out_specs = base + "_specs.csv"
-            df_specs.to_csv(out_specs, index=False, encoding="utf-8-sig")
-        else:
-            out_specs = base + "_specs.json"
-            with open(out_specs, "w", encoding="utf-8") as f:
-                json.dump(df_specs.to_dict(orient="records"), f, ensure_ascii=False, indent=2)
-
-    return out_products, out_specs
+    return out_products
 
 # ============================ GUI: ВІКНО ХАРАКТЕРИСТИК ============================
 
@@ -730,6 +1003,7 @@ class App(ctk.CTk):
 
         self.templates = load_templates()
         self.title_tags_templates = load_title_tags_templates(self.templates)
+        self.export_fields = load_export_fields()
         self.current_category_id = None
         self.current_brand_id = None
         self._current_film_type_key = None
@@ -748,6 +1022,8 @@ class App(ctk.CTk):
         self._rename_entry_meta = None
         self._rename_delay_min = 0.35
         self._rename_delay_max = 4.0
+        self._export_selected_index = None
+        self._export_tree_updating = False
 
         self._build_header()
         self._build_tabs()
@@ -775,10 +1051,12 @@ class App(ctk.CTk):
 
         self.tab_catalog   = tabs.add("Каталог")
         self.tab_templates = tabs.add("Шаблони")
+        self.tab_export    = tabs.add("Експорт")
         self.tab_generate  = tabs.add("Генерація")
 
         self._build_tab_catalog()
         self._build_tab_templates()
+        self._build_tab_export()
         self._build_tab_generate()
 
     def _film_type_names(self):
@@ -957,29 +1235,40 @@ class App(ctk.CTk):
     def _apply_tree_rename(self, kind, iid, new_value):
         if kind == "cat":
             cat_id = int(iid.split("_")[1])
-            rename_category(cat_id, new_value)
+            result = rename_category(cat_id, new_value)
+            if result is not True:
+                if isinstance(result, sqlite3.IntegrityError):
+                    show_error("Категорія з такою назвою вже існує.")
+                else:
+                    show_error("Не вдалося перейменувати категорію.")
             self._refresh_categories()
             self.after(10, lambda: self._restore_tree_selection("cat", f"cat_{cat_id}"))
         elif kind == "brand":
             brand_id = int(iid.split("_")[1])
-            if not self.current_category_id:
-                rename_brand(brand_id, new_value)
+            result = rename_brand(brand_id, new_value)
+            if result is not True:
+                if isinstance(result, sqlite3.IntegrityError):
+                    show_error("Бренд з такою назвою вже існує.")
+                else:
+                    show_error("Не вдалося перейменувати бренд.")
+            if self.current_category_id:
+                self._refresh_brands(self.current_category_id)
+            else:
                 self._refresh_brands(None)
-                self._reload_gen_tree()
-                return
-            rename_brand(brand_id, new_value)
-            self._refresh_brands(self.current_category_id)
             self._reload_gen_tree()
             self.after(10, lambda: self._restore_tree_selection("brand", f"brand_{brand_id}"))
         else:
             model_id = int(iid.split("_")[1])
-            if not self.current_brand_id:
-                rename_model(model_id, new_value)
+            result = rename_model(model_id, new_value)
+            if result is not True:
+                if isinstance(result, sqlite3.IntegrityError):
+                    show_error("Модель з такою назвою вже існує.")
+                else:
+                    show_error("Не вдалося перейменувати модель.")
+            if self.current_brand_id:
+                self._refresh_models(self.current_brand_id)
+            else:
                 self._refresh_models(None)
-                self._reload_gen_tree()
-                return
-            rename_model(model_id, new_value)
-            self._refresh_models(self.current_brand_id)
             self._reload_gen_tree()
             self.after(10, lambda: self._restore_tree_selection("model", f"model_{model_id}"))
 
@@ -1054,7 +1343,16 @@ class App(ctk.CTk):
         if not self.current_category_id: return show_error("Виберіть категорію.")
         name = self.cat_entry.get().strip()
         if not name: return show_error("Введіть нову назву категорії.")
-        rename_category(self.current_category_id, name); self._refresh_categories()
+        cat_id = self.current_category_id
+        result = rename_category(cat_id, name)
+        if result is not True:
+            if isinstance(result, sqlite3.IntegrityError):
+                show_error("Категорія з такою назвою вже існує.")
+            else:
+                show_error("Не вдалося перейменувати категорію.")
+        self._refresh_categories()
+        if cat_id:
+            self.after(10, lambda: self._restore_tree_selection("cat", f"cat_{cat_id}"))
 
     def _cat_delete(self):
         selection = list(self.cat_tree.selection())
@@ -1087,7 +1385,16 @@ class App(ctk.CTk):
         if not self.current_brand_id: return show_error("Виберіть бренд.")
         name = self.brand_entry.get().strip()
         if not name: return show_error("Введіть нову назву бренду.")
-        rename_brand(self.current_brand_id, name); self._refresh_brands(self.current_category_id)
+        brand_id = self.current_brand_id
+        result = rename_brand(brand_id, name)
+        if result is not True:
+            if isinstance(result, sqlite3.IntegrityError):
+                show_error("Бренд з такою назвою вже існує.")
+            else:
+                show_error("Не вдалося перейменувати бренд.")
+        self._refresh_brands(self.current_category_id)
+        if brand_id:
+            self.after(10, lambda: self._restore_tree_selection("brand", f"brand_{brand_id}"))
         self._reload_gen_tree()
 
     def _brand_delete(self):
@@ -1125,7 +1432,14 @@ class App(ctk.CTk):
         model_id = int(sel[0].split("_")[1])
         name = self.model_entry.get().strip()
         if not name: return show_error("Введіть нову назву моделі.")
-        rename_model(model_id, name); self._refresh_models(self.current_brand_id)
+        result = rename_model(model_id, name)
+        if result is not True:
+            if isinstance(result, sqlite3.IntegrityError):
+                show_error("Модель з такою назвою вже існує.")
+            else:
+                show_error("Не вдалося перейменувати модель.")
+        self._refresh_models(self.current_brand_id)
+        self.after(10, lambda: self._restore_tree_selection("model", f"model_{model_id}"))
         self._reload_gen_tree()
 
     def _model_delete(self):
@@ -1291,6 +1605,247 @@ class App(ctk.CTk):
         self.templates["descriptions"].setdefault(cat, {})[film] = txt
         save_templates(self.templates)
         show_info("Шаблон опису збережено.")
+
+    # -------- Експортні поля
+    def _build_tab_export(self):
+        wrap = ctk.CTkFrame(self.tab_export)
+        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+        wrap.grid_columnconfigure(0, weight=0)
+        wrap.grid_columnconfigure(1, weight=1)
+        wrap.grid_rowconfigure(0, weight=1)
+
+        list_frame = ctk.CTkFrame(wrap)
+        list_frame.grid(row=0, column=0, sticky="ns", padx=(0, 10))
+        list_frame.grid_rowconfigure(0, weight=1)
+        list_frame.grid_columnconfigure(0, weight=1)
+
+        self.export_fields_tree = ttk.Treeview(
+            list_frame,
+            columns=("field", "enabled"),
+            show="headings",
+            selectmode="browse",
+            height=18,
+        )
+        self.export_fields_tree.heading("field", text="Поле")
+        self.export_fields_tree.heading("enabled", text="Увімкнено")
+        self.export_fields_tree.column("field", width=220, anchor="w")
+        self.export_fields_tree.column("enabled", width=90, anchor="center")
+        self.export_fields_tree.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.export_fields_tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        self.export_fields_tree.configure(yscrollcommand=y_scroll.set)
+        self.export_fields_tree.bind("<<TreeviewSelect>>", self._on_export_field_select)
+
+        btn_frame = ctk.CTkFrame(list_frame)
+        btn_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ctk.CTkButton(btn_frame, text="Додати поле", command=self._export_add_field).pack(side="left", padx=4)
+        ctk.CTkButton(btn_frame, text="Видалити", command=self._export_delete_field).pack(side="left", padx=4)
+        ctk.CTkButton(btn_frame, text="Вгору", command=lambda: self._export_move_field(-1)).pack(side="right", padx=4)
+        ctk.CTkButton(btn_frame, text="Вниз", command=lambda: self._export_move_field(1)).pack(side="right", padx=4)
+
+        detail = ctk.CTkFrame(wrap)
+        detail.grid(row=0, column=1, sticky="nsew")
+        detail.grid_rowconfigure(4, weight=1)
+
+        self.export_field_name_var = tk.StringVar(value="")
+        self.export_field_enabled_var = tk.BooleanVar(value=False)
+
+        ctk.CTkLabel(detail, text="Назва поля").pack(anchor="w", padx=10, pady=(8, 0))
+        self.export_field_name_entry = ctk.CTkEntry(detail, textvariable=self.export_field_name_var)
+        self.export_field_name_entry.pack(fill="x", padx=10, pady=(0, 8))
+
+        self.export_field_enabled_check = ctk.CTkCheckBox(
+            detail,
+            text="Увімкнути поле",
+            variable=self.export_field_enabled_var,
+        )
+        self.export_field_enabled_check.pack(anchor="w", padx=10, pady=(0, 8))
+
+        ctk.CTkLabel(detail, text="Шаблон (Jinja2)").pack(anchor="w", padx=10, pady=(0, 4))
+        self.export_field_template = ctk.CTkTextbox(detail, height=220)
+        self.export_field_template.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+
+        hint_text = (
+            "Доступні змінні: {{ brand }}, {{ model }}, {{ category }}, {{ film_type }}, {{ title }}, {{ description }}, {{ tags }}, "
+            "{{ spec('Назва') }}, {{ specs['Ключ'] }}, {{ row_number }}, {{ now }}."
+        )
+        ctk.CTkLabel(detail, text=hint_text, justify="left", anchor="w", wraplength=360).pack(
+            fill="x", padx=10, pady=(0, 8)
+        )
+
+        action_row = ctk.CTkFrame(detail)
+        action_row.pack(fill="x", padx=10, pady=(0, 10))
+        self.export_apply_button = ctk.CTkButton(action_row, text="Застосувати", command=lambda: self._export_apply_detail(False))
+        self.export_apply_button.pack(side="right", padx=4)
+        ctk.CTkButton(action_row, text="Зберегти", command=self._export_save_all).pack(side="right", padx=4)
+        ctk.CTkButton(action_row, text="Відновити стандартні", command=self._export_reset_defaults).pack(side="left", padx=4)
+
+        self._refresh_export_fields_tree(select_index=0 if self.export_fields else None)
+        if self.export_fields:
+            self._load_export_field_detail(0)
+        else:
+            self._load_export_field_detail(None)
+
+    def _refresh_export_fields_tree(self, select_index=None):
+        tree = getattr(self, "export_fields_tree", None)
+        if tree is None:
+            return
+        self._export_tree_updating = True
+        tree.delete(*tree.get_children())
+        for idx, field in enumerate(self.export_fields):
+            name = str(field.get("field", "")).strip()
+            status = "Так" if field.get("enabled") else "Ні"
+            tree.insert("", "end", iid=f"exp_{idx}", values=(name, status))
+        if select_index is not None and 0 <= select_index < len(self.export_fields):
+            iid = f"exp_{select_index}"
+            tree.selection_set(iid)
+            tree.focus(iid)
+        self._export_tree_updating = False
+
+    def _set_export_detail_state(self, enabled: bool):
+        state = tk.NORMAL if enabled else tk.DISABLED
+        if hasattr(self, "export_field_name_entry"):
+            self.export_field_name_entry.configure(state=state)
+        if hasattr(self, "export_field_enabled_check"):
+            self.export_field_enabled_check.configure(state=state)
+        if hasattr(self, "export_apply_button"):
+            self.export_apply_button.configure(state=state)
+        if hasattr(self, "export_field_template"):
+            self.export_field_template.configure(state="normal" if enabled else "disabled")
+
+    def _load_export_field_detail(self, index):
+        if index is None or index < 0 or index >= len(self.export_fields):
+            self._export_selected_index = None
+            self._set_export_detail_state(False)
+            if hasattr(self, "export_field_name_var"):
+                self.export_field_name_var.set("")
+            if hasattr(self, "export_field_enabled_var"):
+                self.export_field_enabled_var.set(False)
+            if hasattr(self, "export_field_template"):
+                self.export_field_template.configure(state="normal")
+                self.export_field_template.delete("1.0", "end")
+                self.export_field_template.configure(state="disabled")
+            return
+
+        self._export_selected_index = index
+        field = self.export_fields[index]
+        name = str(field.get("field", ""))
+        template = field.get("template", "")
+        if template is None:
+            template = ""
+        enabled = bool(field.get("enabled"))
+
+        self._set_export_detail_state(True)
+        self.export_field_name_var.set(name)
+        self.export_field_enabled_var.set(enabled)
+        self.export_field_template.configure(state="normal")
+        self.export_field_template.delete("1.0", "end")
+        self.export_field_template.insert("1.0", str(template))
+
+    def _on_export_field_select(self, _event):
+        if getattr(self, "_export_tree_updating", False):
+            return
+        selection = self.export_fields_tree.selection() if hasattr(self, "export_fields_tree") else []
+        if not selection:
+            self._load_export_field_detail(None)
+            return
+        iid = selection[0]
+        try:
+            idx = int(iid.split("_", 1)[1])
+        except (IndexError, ValueError):
+            idx = None
+        self._export_apply_detail(False)
+        if idx is None:
+            self._load_export_field_detail(None)
+        else:
+            self._load_export_field_detail(idx)
+
+    def _export_apply_detail(self, save_to_file: bool):
+        idx = getattr(self, "_export_selected_index", None)
+        if idx is None or idx < 0 or idx >= len(self.export_fields):
+            return False
+        field = self.export_fields[idx]
+        name = self.export_field_name_var.get().strip()
+        if not name:
+            name = field.get("field") or f"Поле_{idx + 1}"
+            self.export_field_name_var.set(name)
+        template = self.export_field_template.get("1.0", "end").rstrip()
+        enabled = bool(self.export_field_enabled_var.get())
+
+        changed = False
+        if field.get("field") != name:
+            field["field"] = name
+            changed = True
+        if field.get("template", "") != template:
+            field["template"] = template
+            changed = True
+        if bool(field.get("enabled")) != enabled:
+            field["enabled"] = enabled
+            changed = True
+
+        if changed:
+            self._refresh_export_fields_tree(select_index=idx)
+
+        if save_to_file:
+            save_export_fields(self.export_fields)
+            show_info("Налаштування експорту збережено.")
+
+        return True
+
+    def _export_save_all(self):
+        self._export_apply_detail(False)
+        save_export_fields(self.export_fields)
+        show_info("Налаштування експорту збережено.")
+
+    def _export_add_field(self):
+        self._export_apply_detail(False)
+        new_field = {"field": "Нове_поле", "template": "", "enabled": True}
+        self.export_fields.append(new_field)
+        idx = len(self.export_fields) - 1
+        self._refresh_export_fields_tree(select_index=idx)
+        self._load_export_field_detail(idx)
+
+    def _export_delete_field(self):
+        idx = getattr(self, "_export_selected_index", None)
+        if idx is None or idx < 0 or idx >= len(self.export_fields):
+            show_error("Оберіть поле для видалення.")
+            return
+        if not messagebox.askyesno("Підтвердження", "Видалити вибране поле?"):
+            return
+        self.export_fields.pop(idx)
+        if self.export_fields:
+            new_idx = min(idx, len(self.export_fields) - 1)
+            self._refresh_export_fields_tree(select_index=new_idx)
+            self._load_export_field_detail(new_idx)
+        else:
+            self._refresh_export_fields_tree(select_index=None)
+            self._load_export_field_detail(None)
+
+    def _export_move_field(self, direction: int):
+        idx = getattr(self, "_export_selected_index", None)
+        if idx is None:
+            return
+        new_idx = idx + direction
+        if new_idx < 0 or new_idx >= len(self.export_fields):
+            return
+        self._export_apply_detail(False)
+        self.export_fields[idx], self.export_fields[new_idx] = self.export_fields[new_idx], self.export_fields[idx]
+        self._refresh_export_fields_tree(select_index=new_idx)
+        self._load_export_field_detail(new_idx)
+
+    def _export_reset_defaults(self):
+        if not messagebox.askyesno("Підтвердження", "Відновити стандартний список полів?"):
+            return
+        self.export_fields = [field.copy() for field in DEFAULT_EXPORT_FIELDS]
+        save_export_fields(self.export_fields)
+        if self.export_fields:
+            self._refresh_export_fields_tree(select_index=0)
+            self._load_export_field_detail(0)
+        else:
+            self._refresh_export_fields_tree(select_index=None)
+            self._load_export_field_detail(None)
+        show_info("Стандартні поля відновлено.")
 
     # -------- Генерація
     def _build_tab_generate(self):
@@ -1577,6 +2132,7 @@ class App(ctk.CTk):
     def _generate(self):
         # зберегти (на випадок якщо змінювали шаблони перед тим)
         self._save_title_tags(show_message=False)
+        self._export_apply_detail(save_to_file=False)
 
         selected_types = [name for name, var in self.ft_vars if var.get()]
         if not selected_types:
@@ -1592,32 +2148,40 @@ class App(ctk.CTk):
 
         # вибір моделей через дерево
         selected_models = sorted(self._collect_checked_model_ids())
-        if selected_models:
-            records = generate_dataset(
-                selected_types,
-                self.templates,
-                self.title_tags_templates,
-                model_ids=selected_models,
-            )
-        else:
-            records = generate_dataset(
-                selected_types,
-                self.templates,
-                self.title_tags_templates,
-            )
+        try:
+            if selected_models:
+                records, columns = generate_export_rows(
+                    selected_types,
+                    self.templates,
+                    self.title_tags_templates,
+                    self.export_fields,
+                    model_ids=selected_models,
+                )
+            else:
+                records, columns = generate_export_rows(
+                    selected_types,
+                    self.templates,
+                    self.title_tags_templates,
+                    self.export_fields,
+                )
+        except ValueError as err:
+            return show_error(str(err))
+
         if not records:
             return show_error("Немає даних для генерації (перевірте моделі).")
 
         # експорт
         try:
-            products_file, specs_file = export_products_and_specs(
-                records, self.export_fmt_var.get(), self.out_folder_var.get().strip()
+            products_file = export_products(
+                records,
+                columns,
+                self.export_fmt_var.get(),
+                self.out_folder_var.get().strip(),
             )
         except Exception as e:
             return show_error(f"Не вдалося зберегти файли: {e}")
 
-        msg = f"✅ Згенеровано {len(records)} товарів.\nФайл товарів: {products_file}"
-        if specs_file: msg += f"\nФайл характеристик: {specs_file}"
+        msg = f"✅ Згенеровано {len(records)} рядків.\nФайл експорту: {products_file}"
         show_info(msg)
 
 # ============================ ENTRY ============================

@@ -1,0 +1,282 @@
+[
+  {
+    "field": "Категорія",
+    "template": "{{ category }}",
+    "enabled": true
+  },
+  {
+    "field": "Бренд",
+    "template": "{{ brand }}",
+    "enabled": true
+  },
+  {
+    "field": "Модель",
+    "template": "{{ model }}",
+    "enabled": true
+  },
+  {
+    "field": "Тип_плівки",
+    "template": "{{ film_type }}",
+    "enabled": true
+  },
+  {
+    "field": "Назва_позиції",
+    "template": "{{ title }}",
+    "enabled": true
+  },
+  {
+    "field": "Назва_позиції_укр",
+    "template": "{{ title }}",
+    "enabled": false
+  },
+  {
+    "field": "Пошукові_запити",
+    "template": "{{ tags }}",
+    "enabled": true
+  },
+  {
+    "field": "Пошукові_запити_укр",
+    "template": "{{ tags }}",
+    "enabled": false
+  },
+  {
+    "field": "Опис",
+    "template": "{{ description }}",
+    "enabled": true
+  },
+  {
+    "field": "Опис_укр",
+    "template": "{{ description }}",
+    "enabled": false
+  },
+  {
+    "field": "Код_товару",
+    "template": "{{ spec('Код_товару') }}",
+    "enabled": false
+  },
+  {
+    "field": "Тип_товару",
+    "template": "{{ film_type }}",
+    "enabled": false
+  },
+  {
+    "field": "Ціна",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Валюта",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Одиниця_виміру",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Мінімальний_обсяг_замовлення",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Оптова_ціна",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Мінімальне_замовлення_опт",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Посилання_зображення",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Наявність",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Кількість",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Номер_групи",
+    "template": "{{ category_id }}",
+    "enabled": false
+  },
+  {
+    "field": "Назва_групи",
+    "template": "{{ category }}",
+    "enabled": false
+  },
+  {
+    "field": "Посилання_підрозділу",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Можливість_поставки",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Термін_поставки",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Спосіб_пакування",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Спосіб_пакування_укр",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Унікальний_ідентифікатор",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Ідентифікатор_товару",
+    "template": "{{ model_id }}",
+    "enabled": false
+  },
+  {
+    "field": "Ідентифікатор_підрозділу",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Ідентифікатор_групи",
+    "template": "{{ category_id }}",
+    "enabled": false
+  },
+  {
+    "field": "Виробник",
+    "template": "{{ brand }}",
+    "enabled": false
+  },
+  {
+    "field": "Країна_виробник",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Знижка",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "ID_групи_різновидів",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Особисті_нотатки",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Продукт_на_сайті",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Термін_дії_знижки_від",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Термін_дії_знижки_до",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Ціна_від",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Ярлик",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "HTML_заголовок",
+    "template": "{{ title }}",
+    "enabled": false
+  },
+  {
+    "field": "HTML_заголовок_укр",
+    "template": "{{ title }}",
+    "enabled": false
+  },
+  {
+    "field": "HTML_опис",
+    "template": "{{ description }}",
+    "enabled": false
+  },
+  {
+    "field": "HTML_опис_укр",
+    "template": "{{ description }}",
+    "enabled": false
+  },
+  {
+    "field": "Код_маркування_(GTIN)",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Номер_пристрою_(MPN)",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Вага,кг",
+    "template": "{{ spec('Вага, кг') }}",
+    "enabled": false
+  },
+  {
+    "field": "Ширина,см",
+    "template": "{{ spec('Ширина, см') }}",
+    "enabled": false
+  },
+  {
+    "field": "Висота,см",
+    "template": "{{ spec('Висота, см') }}",
+    "enabled": false
+  },
+  {
+    "field": "Довжина,см",
+    "template": "{{ spec('Довжина, см') }}",
+    "enabled": false
+  },
+  {
+    "field": "Де_знаходиться_товар",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Назва_Характеристики",
+    "template": "{{ spec_items | map(attribute=0) | join('; ') }}",
+    "enabled": false
+  },
+  {
+    "field": "Одиниця_виміру,_Характеристики",
+    "template": "",
+    "enabled": false
+  },
+  {
+    "field": "Значення_Характеристики",
+    "template": "{{ spec_items | map(attribute=1) | join('; ') }}",
+    "enabled": false
+  }
+]
