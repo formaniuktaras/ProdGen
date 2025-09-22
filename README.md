@@ -4,11 +4,18 @@ ProdGen is a desktop application for managing product categories, brands, and mo
 
 ## Manual QA
 
-Follow the steps below to confirm that duplicate rename attempts are handled gracefully:
+### Перейменування з дублікатами
 
-1. Launch the application with `python main.py` and ensure at least two categories exist (for example, "Смартфони" and "Планшети").
-2. Attempt to rename one category to match the other by selecting it, entering the duplicate name, and clicking **Перейменувати** or by double-clicking the tree row and confirming the inline rename.
-3. Observe that an error dialog appears with the message about the name already existing and the UI remains responsive.
-4. Repeat the same process for a brand and a model inside a category to confirm the same warning dialog appears and the tables continue to function normally after dismissing the message.
+1. Запустіть додаток `python main.py` і переконайтеся, що у каталозі є щонайменше дві категорії (наприклад, «Смартфони» та «Планшети»).
+2. Спробуйте перейменувати одну категорію на назву іншої через кнопку **Перейменувати** або через подвійний клік по рядку.
+3. Переконайтеся, що з'являється повідомлення «Категорія з такою назвою вже існує» і інтерфейс залишається працездатним.
+4. Повторіть ті самі дії для бренду та моделі всередині категорії, щоб впевнитися, що попередження з'являється і таблиці не блокуються.
 
-These steps verify that the GUI displays a friendly warning instead of crashing when the database rejects a rename because the name already exists.
+### Налаштування експорту
+
+1. Перейдіть на вкладку **Експорт** та увімкніть поля, які потрібно бачити у файлі (наприклад, активуйте «Назва_позиції_укр» або додайте власне поле).
+2. За потреби відредагуйте шаблон поля, використовуючи доступні змінні (наприклад, `{{ title }}` або `{{ spec('Вага, кг') }}`), та натисніть **Застосувати** → **Зберегти**.
+3. На вкладці **Генерація** оберіть декілька моделей і натисніть **Згенерувати**.
+4. Відкрийте згенерований файл та переконайтеся, що виведено лише вибрані колонки у потрібному порядку і окремий файл характеристик не створюється.
+
+Ці кроки підтверджують, що попередження про дублікати й надалі працюють, а кастомізація полів експорту дозволяє формувати файл під вимоги різних маркетплейсів без окремого експорту характеристик.
