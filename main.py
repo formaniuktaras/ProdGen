@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 import time
+from copy import deepcopy
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -125,15 +126,27 @@ def _build_title_tags_defaults(film_type_names, base_title, base_tags):
 
 def load_templates():
     if not os.path.exists(TEMPLATES_FILE):
-        with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
-            json.dump(DEFAULT_TEMPLATES, f, ensure_ascii=False, indent=2)
-        return DEFAULT_TEMPLATES.copy()
-    with open(TEMPLATES_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        defaults = deepcopy(DEFAULT_TEMPLATES)
+        save_templates(defaults)
+        return defaults
+
+    try:
+        with open(TEMPLATES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        defaults = deepcopy(DEFAULT_TEMPLATES)
+        save_templates(defaults)
+        return defaults
+
+    if not isinstance(data, dict):
+        defaults = deepcopy(DEFAULT_TEMPLATES)
+        save_templates(defaults)
+        return defaults
+
     # гарантуємо всі ключі
     for k, v in DEFAULT_TEMPLATES.items():
         if k not in data:
-            data[k] = v
+            data[k] = deepcopy(v)
     return data
 
 def save_templates(dct):
