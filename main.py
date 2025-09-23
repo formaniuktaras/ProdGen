@@ -1146,7 +1146,7 @@ def generate_export_rows(
                 "now": now_value,
             }
 
-            record = {}
+            row_values = []
             formula_context = None
             for field in enabled_fields:
                 field_name = field["field"]
@@ -1183,13 +1183,40 @@ def generate_export_rows(
                     value = ""
                 elif not isinstance(value, str):
                     value = str(value)
-                record[field_name] = value
-            rows.append(record)
+                row_values.append(value)
+            rows.append(row_values)
             progress_count += 1
             if progress_callback is not None:
                 progress_callback(progress_count, total_steps)
 
     return rows, column_order
+
+
+def _row_to_values(record, columns):
+    if isinstance(record, dict):
+        return [record.get(name, "") for name in columns]
+    if isinstance(record, (list, tuple)):
+        values = list(record)
+        if len(values) < len(columns):
+            values.extend([""] * (len(columns) - len(values)))
+        elif len(values) > len(columns):
+            values = values[: len(columns)]
+        return values
+    return ["" for _ in columns]
+
+
+def _make_unique_column_keys(columns):
+    counts = {}
+    unique_keys = []
+    for name in columns:
+        count = counts.get(name, 0) + 1
+        counts[name] = count
+        if count == 1:
+            unique_keys.append(name)
+        else:
+            unique_keys.append(f"{name}__{count}")
+    return unique_keys
+
 
 def export_products(records: list, columns: list, fmt: str, folder: str):
     ensure_folder(folder)
@@ -1235,12 +1262,17 @@ def export_products(records: list, columns: list, fmt: str, folder: str):
                 if columns:
                     writer.writerow(columns)
                 for record in records:
-                    row = [record.get(col, "") for col in columns]
+                    row = _row_to_values(record, columns)
                     writer.writerow(row)
     elif fmt == JSON_FORMAT_LABEL:
         out_products = base + ".json"
+        json_records = []
+        json_columns = _make_unique_column_keys(columns)
+        for record in records:
+            values = _row_to_values(record, columns)
+            json_records.append({key: value for key, value in zip(json_columns, values)})
         with open(out_products, "w", encoding="utf-8") as f:
-            json.dump(records, f, ensure_ascii=False, indent=2)
+            json.dump(json_records, f, ensure_ascii=False, indent=2)
     else:
         raise ValueError(f"Невідомий формат експорту: {fmt}")
 
@@ -1471,12 +1503,7 @@ class App(ctk.CTk):
         self._export_tree_updating = False
         self.progress_bar = None
         self.progress_label = None
-        self.filmtype_tree = None
-        self._current_filmtype_index = None
-        self.filmtype_name_var = tk.StringVar(value="")
-        self.filmtype_enabled_var = tk.BooleanVar(value=True)
-
-        self._sync_templates_with_catalog()
+        self._preview_window = None
 
         self._build_header()
         self._build_tabs()
@@ -3296,7 +3323,8 @@ class App(ctk.CTk):
         table_frame.grid_columnconfigure(0, weight=1)
         table_frame.grid_rowconfigure(0, weight=1)
 
-        tree = ttk.Treeview(table_frame, columns=columns, show="headings")
+        column_ids = [f"preview_col_{idx}" for idx in range(len(columns))]
+        tree = ttk.Treeview(table_frame, columns=column_ids, show="headings")
         tree.grid(row=0, column=0, sticky="nsew")
 
         y_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
@@ -3305,12 +3333,12 @@ class App(ctk.CTk):
         x_scroll.grid(row=1, column=0, sticky="ew")
         tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
 
-        for col in columns:
-            tree.heading(col, text=col)
-            tree.column(col, anchor="w", stretch=True, width=160)
+        for col_id, header in zip(column_ids, columns):
+            tree.heading(col_id, text=header)
+            tree.column(col_id, anchor="w", stretch=True, width=160)
 
         for record in preview_records:
-            values = [record.get(col, "") for col in columns]
+            values = _row_to_values(record, columns)
             tree.insert("", "end", values=values)
 
         if len(records) > preview_limit:
