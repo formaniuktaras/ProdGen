@@ -129,7 +129,6 @@ except ModuleNotFoundError:
     )
     sys.exit(1)
 
-
 DB_FILE = "catalog.db"
 TEMPLATES_FILE = "templates.json"
 EXPORT_FIELDS_FILE = "export_fields.json"
@@ -1352,8 +1351,9 @@ class App(ctk.CTk):
         self.current_category_id = None
         self.current_brand_id = None
         self._current_film_type_key = None
-        self._film_type_display_to_key = {}
-        self._film_type_key_to_display = {}
+        self._current_desc_category = None
+        self._template_scope_display_to_pair = {}
+        self._template_scope_pair_to_display = {}
         self._gen_tree = None
         self._gen_tree_states = {}
         self._gen_tree_meta = {}
@@ -1423,17 +1423,25 @@ class App(ctk.CTk):
             items.append((name, name))
         return items
 
-    def _film_type_key_from_display(self, label: str) -> str:
-        if not label:
-            return "default"
-        return self._film_type_display_to_key.get(label, "default")
+    def _template_scope_items(self):
+        categories = list(self.templates.get("descriptions", {}).keys())
+        film_items = self._film_type_menu_items()
+        if not categories:
+            categories = [""]
+        items = []
+        for cat in categories:
+            display_cat = cat if cat else "—"
+            for film_label, film_key in film_items:
+                label = f"{display_cat} — {film_label}"
+                items.append((label, (cat, film_key)))
+        return items
 
     def _selected_film_type_key(self) -> str:
         key = getattr(self, "_current_film_type_key", None)
-        if key == "default":
+        if key in (None, ""):
+            self._current_film_type_key = "default"
             return "default"
-        names = set(self._film_type_names())
-        if key in names:
+        if key == "default" or key in set(self._film_type_names()):
             return key
         self._current_film_type_key = "default"
         return "default"
@@ -1829,16 +1837,16 @@ class App(ctk.CTk):
 
         selector = ctk.CTkFrame(wrap)
         selector.pack(fill="x", padx=10, pady=(6,2))
-        ctk.CTkLabel(selector, text="Тип плівки:").pack(side="left", padx=(0,6))
-        self.film_type_var = tk.StringVar(value="")
-        self.film_type_menu = ctk.CTkOptionMenu(
+        ctk.CTkLabel(selector, text="Категорія та тип плівки:").pack(side="left", padx=(0,6))
+        self.template_scope_var = tk.StringVar(value="")
+        self.template_scope_menu = ctk.CTkOptionMenu(
             selector,
             values=["—"],
-            variable=self.film_type_var,
-            width=220,
-            command=self._on_film_type_change
+            variable=self.template_scope_var,
+            width=320,
+            command=self._on_template_scope_change
         )
-        self.film_type_menu.pack(side="left")
+        self.template_scope_menu.pack(side="left")
 
         # Ліва колонка: Заголовок і Теги
         left = ctk.CTkFrame(wrap)
@@ -1858,13 +1866,11 @@ class App(ctk.CTk):
         right = ctk.CTkFrame(wrap)
         right.pack(side="left", fill="both", expand=True, padx=(10,0), pady=5)
 
-        top = ctk.CTkFrame(right); top.pack(fill="x", padx=10, pady=5)
-        ctk.CTkLabel(top, text="Категорія:").pack(side="left", padx=(0,6))
-        self.desc_cat_var = tk.StringVar(value=list(self.templates["descriptions"].keys())[0])
-        self.desc_cat_menu = ctk.CTkOptionMenu(top, values=list(self.templates["descriptions"].keys()),
-                                               variable=self.desc_cat_var, width=200,
-                                               command=lambda _v: self._load_desc_template())
-        self.desc_cat_menu.pack(side="left")
+        categories = list(self.templates.get("descriptions", {}).keys())
+        initial_category = categories[0] if categories else ""
+        self.desc_cat_var = tk.StringVar(value=initial_category)
+        if self._current_desc_category is None:
+            self._current_desc_category = initial_category
 
         ctk.CTkLabel(right, text="Шаблон опису (доступні {{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10,0))
         self.desc_box = ctk.CTkTextbox(right)
@@ -1873,7 +1879,7 @@ class App(ctk.CTk):
         btn_row = ctk.CTkFrame(right); btn_row.pack(fill="x", padx=10, pady=6)
         ctk.CTkButton(btn_row, text="Зберегти опис", command=self._save_desc_template).pack(side="right")
 
-        self._refresh_film_type_menu()
+        self._refresh_template_scope_menu()
 
     def _save_title_tags(self, show_message: bool = True):
         film = self._selected_film_type_key()
@@ -1905,34 +1911,52 @@ class App(ctk.CTk):
         self.tags_box.delete("1.0", "end")
         self.tags_box.insert("1.0", tags_template)
 
-    def _refresh_film_type_menu(self):
-        if not hasattr(self, "film_type_menu"):
+    def _refresh_template_scope_menu(self):
+        if not hasattr(self, "template_scope_menu"):
             return
-        items = self._film_type_menu_items()
+        items = self._template_scope_items()
+        if not items:
+            return
         display_values = [label for label, _ in items]
-        self._film_type_display_to_key = {label: key for label, key in items}
-        self._film_type_key_to_display = {key: label for label, key in items}
-        self.film_type_menu.configure(values=display_values)
+        self._template_scope_display_to_pair = {label: pair for label, pair in items}
+        self._template_scope_pair_to_display = {pair: label for label, pair in items}
+        self.template_scope_menu.configure(values=display_values)
 
-        valid_keys = set(self._film_type_key_to_display.keys())
-        current_key = getattr(self, "_current_film_type_key", None)
-        if current_key not in valid_keys:
-            if len(items) > 1:
-                current_key = items[1][1]
-            else:
-                current_key = items[0][1]
-        self._current_film_type_key = current_key
-        current_display = self._film_type_key_to_display[current_key]
-        self.film_type_var.set(current_display)
-        self.film_type_menu.set(current_display)
-        self._on_film_type_change()
+        current_cat = getattr(self, "_current_desc_category", None)
+        current_film = self._selected_film_type_key()
+        if current_cat is None:
+            current_cat = items[0][1][0]
+        pair = (current_cat, current_film)
+        if pair not in self._template_scope_pair_to_display:
+            pair = items[0][1]
+            current_cat, current_film = pair
 
-    def _on_film_type_change(self, selected_label=None):
-        if selected_label is not None:
-            self._current_film_type_key = self._film_type_key_from_display(selected_label)
-        elif not getattr(self, "_current_film_type_key", None):
-            current_label = self.film_type_var.get() if hasattr(self, "film_type_var") else None
-            self._current_film_type_key = self._film_type_key_from_display(current_label)
+        self._current_desc_category = current_cat
+        if hasattr(self, "desc_cat_var"):
+            self.desc_cat_var.set(current_cat or "")
+        self._current_film_type_key = current_film
+        current_label = self._template_scope_pair_to_display[pair]
+        self.template_scope_var.set(current_label)
+        self.template_scope_menu.set(current_label)
+        self._on_template_scope_change(current_label)
+
+    def _on_template_scope_change(self, selected_label=None):
+        if not hasattr(self, "template_scope_var"):
+            return
+        if selected_label is None:
+            selected_label = self.template_scope_var.get()
+        pair = self._template_scope_display_to_pair.get(selected_label)
+        if pair is None and self._template_scope_display_to_pair:
+            pair = next(iter(self._template_scope_display_to_pair.values()))
+        if pair is None:
+            return
+        cat, film = pair
+        if cat is None:
+            cat = ""
+        self._current_desc_category = cat
+        if hasattr(self, "desc_cat_var"):
+            self.desc_cat_var.set(cat)
+        self._current_film_type_key = film or "default"
         self._load_title_tags_template()
         self._load_desc_template()
 
@@ -1940,6 +1964,12 @@ class App(ctk.CTk):
         if not hasattr(self, "desc_box") or not hasattr(self, "desc_cat_var"):
             return
         cat = self.desc_cat_var.get()
+        if not cat:
+            categories = list(self.templates.get("descriptions", {}).keys())
+            if categories:
+                cat = categories[0]
+                self.desc_cat_var.set(cat)
+        self._current_desc_category = cat
         film = self._selected_film_type_key()
         descs = self.templates["descriptions"].get(cat, {})
         if film == "default":
@@ -2635,7 +2665,7 @@ class App(ctk.CTk):
             var = tk.BooleanVar(value=bool(item.get("enabled", True)))
             ctk.CTkCheckBox(self.filmtype_frame, text=item["name"], variable=var).pack(side="left", padx=6, pady=2)
             self.ft_vars.append((item["name"], var))
-        self._refresh_film_type_menu()
+        self._refresh_template_scope_menu()
 
     def _choose_folder(self):
         folder = filedialog.askdirectory(title="Виберіть папку для файлів")

@@ -355,7 +355,6 @@ class FormulaEngine:
             return
 
     @classmethod
-
     def evaluate(cls, formula: str, context: Optional[Mapping[str, Any]] = None) -> Any:
         """Evaluate a single formula using the supplied context."""
 
