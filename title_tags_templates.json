@@ -3,24 +3,27 @@
     "title_template": "Гідрогелева плівка {{ film_type }} {{ brand }} {{ model }}",
     "tags_template": "{{ brand }} {{ model }}, плівка {{ brand }} {{ model }}, hydrogel film {{ brand }} {{ model }}, {{ film_type }} {{ brand }} {{ model }}"
   },
-  "прозора": {
-    "title_template": "Гідрогелева плівка {{ film_type }} {{ brand }} {{ model }}",
-    "tags_template": "{{ brand }} {{ model }}, плівка {{ brand }} {{ model }}, hydrogel film {{ brand }} {{ model }}, {{ film_type }} {{ brand }} {{ model }}"
+  "by_film": {
+    "прозора": {
+      "title_template": "Гідрогелева плівка {{ film_type }} {{ brand }} {{ model }}",
+      "tags_template": "{{ brand }} {{ model }}, плівка {{ brand }} {{ model }}, hydrogel film {{ brand }} {{ model }}, {{ film_type }} {{ brand }} {{ model }}"
+    },
+    "матова": {
+      "title_template": "Гідрогелева плівка {{ film_type }} {{ brand }} {{ model }}",
+      "tags_template": "{{ brand }} {{ model }}, плівка {{ brand }} {{ model }}, hydrogel film {{ brand }} {{ model }}, {{ film_type }} {{ brand }} {{ model }}"
+    },
+    "privacy clear": {
+      "title_template": "Гідрогелева плівка {{ film_type }} {{ brand }} {{ model }}",
+      "tags_template": "{{ brand }} {{ model }}, плівка {{ brand }} {{ model }}, hydrogel film {{ brand }} {{ model }}, {{ film_type }} {{ brand }} {{ model }}"
+    },
+    "privacy mate": {
+      "title_template": "Гідрогелева плівка {{ film_type }} {{ brand }} {{ model }}",
+      "tags_template": "{{ brand }} {{ model }}, плівка {{ brand }} {{ model }}, hydrogel film {{ brand }} {{ model }}, {{ film_type }} {{ brand }} {{ model }}"
+    },
+    "anti-blue": {
+      "title_template": "Гідрогелева плівка {{ film_type }} {{ brand }} {{ model }}",
+      "tags_template": "{{ brand }} {{ model }}, плівка {{ brand }} {{ model }}, hydrogel film {{ brand }} {{ model }}, {{ film_type }} {{ brand }} {{ model }}"
+    }
   },
-  "матова": {
-    "title_template": "Гідрогелева плівка {{ film_type }} {{ brand }} {{ model }}",
-    "tags_template": "{{ brand }} {{ model }}, плівка {{ brand }} {{ model }}, hydrogel film {{ brand }} {{ model }}, {{ film_type }} {{ brand }} {{ model }}"
-  },
-  "privacy clear": {
-    "title_template": "Гідрогелева плівка {{ film_type }} {{ brand }} {{ model }}",
-    "tags_template": "{{ brand }} {{ model }}, плівка {{ brand }} {{ model }}, hydrogel film {{ brand }} {{ model }}, {{ film_type }} {{ brand }} {{ model }}"
-  },
-  "privacy mate": {
-    "title_template": "Гідрогелева плівка {{ film_type }} {{ brand }} {{ model }}",
-    "tags_template": "{{ brand }} {{ model }}, плівка {{ brand }} {{ model }}, hydrogel film {{ brand }} {{ model }}, {{ film_type }} {{ brand }} {{ model }}"
-  },
-  "anti-blue": {
-    "title_template": "Гідрогелева плівка {{ film_type }} {{ brand }} {{ model }}",
-    "tags_template": "{{ brand }} {{ model }}, плівка {{ brand }} {{ model }}, hydrogel film {{ brand }} {{ model }}, {{ film_type }} {{ brand }} {{ model }}"
-  }
+  "by_category": {}
 }
