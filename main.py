@@ -3,16 +3,61 @@ import os
 import json
 import re
 import sqlite3
+import sys
 import time
+
+APP_TITLE = "Prom Generator"
+from copy import deepcopy
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-import customtkinter as ctk
-import pandas as pd
-from jinja2 import Template, TemplateError
 
-APP_TITLE = "Prom Generator"
+def _show_dependency_error(message: str) -> None:
+    """Display a blocking error for a missing runtime dependency."""
+
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(APP_TITLE, message)
+    except Exception:
+        print(message, file=sys.stderr)
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+try:
+    import customtkinter as ctk
+except ModuleNotFoundError:
+    _show_dependency_error(
+        "Бібліотека CustomTkinter не знайдена.\n"
+        "Встановіть її командою 'pip install customtkinter' і перезапустіть застосунок."
+    )
+    sys.exit(1)
+
+try:
+    import pandas as pd
+except ModuleNotFoundError:
+    _show_dependency_error(
+        "Бібліотека pandas не знайдена.\n"
+        "Встановіть її командою 'pip install pandas' і перезапустіть застосунок."
+    )
+    sys.exit(1)
+
+try:
+    from jinja2 import Template, TemplateError
+except ModuleNotFoundError:
+    _show_dependency_error(
+        "Бібліотека Jinja2 не знайдена.\n"
+        "Встановіть її командою 'pip install jinja2' і перезапустіть застосунок."
+    )
+    sys.exit(1)
+
 DB_FILE = "catalog.db"
 TEMPLATES_FILE = "templates.json"
 EXPORT_FIELDS_FILE = "export_fields.json"
@@ -125,15 +170,27 @@ def _build_title_tags_defaults(film_type_names, base_title, base_tags):
 
 def load_templates():
     if not os.path.exists(TEMPLATES_FILE):
-        with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
-            json.dump(DEFAULT_TEMPLATES, f, ensure_ascii=False, indent=2)
-        return DEFAULT_TEMPLATES.copy()
-    with open(TEMPLATES_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        defaults = deepcopy(DEFAULT_TEMPLATES)
+        save_templates(defaults)
+        return defaults
+
+    try:
+        with open(TEMPLATES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        defaults = deepcopy(DEFAULT_TEMPLATES)
+        save_templates(defaults)
+        return defaults
+
+    if not isinstance(data, dict):
+        defaults = deepcopy(DEFAULT_TEMPLATES)
+        save_templates(defaults)
+        return defaults
+
     # гарантуємо всі ключі
     for k, v in DEFAULT_TEMPLATES.items():
         if k not in data:
-            data[k] = v
+            data[k] = deepcopy(v)
     return data
 
 def save_templates(dct):
@@ -651,7 +708,9 @@ def generate_export_rows(
     category_ids=None,
     brand_ids=None,
     model_ids=None,
+    progress_callback=None,
 ):
+    film_types = list(film_types)
     pairs = collect_models(category_ids=category_ids, brand_ids=brand_ids, model_ids=model_ids)
     if not pairs:
         return [], []
@@ -684,6 +743,11 @@ def generate_export_rows(
     column_order = [field["field"] for field in enabled_fields]
 
     descriptions = templates.get("descriptions", {})
+
+    total_steps = len(pairs) * len(film_types)
+    progress_count = 0
+    if progress_callback is not None:
+        progress_callback(progress_count, total_steps)
 
     for brand, model, cat, mid, brand_id, cat_id in pairs:
         specs = specs_map.get(mid, {})
@@ -784,6 +848,9 @@ def generate_export_rows(
                     value = str(value)
                 record[field_name] = value
             rows.append(record)
+            progress_count += 1
+            if progress_callback is not None:
+                progress_callback(progress_count, total_steps)
 
     return rows, column_order
 
@@ -1024,6 +1091,8 @@ class App(ctk.CTk):
         self._rename_delay_max = 4.0
         self._export_selected_index = None
         self._export_tree_updating = False
+        self.progress_bar = None
+        self.progress_label = None
 
         self._build_header()
         self._build_tabs()
@@ -1924,7 +1993,66 @@ class App(ctk.CTk):
         action_row.pack(fill="x", padx=10, pady=(6, 0))
         ctk.CTkButton(action_row, text="Згенерувати", command=self._generate, height=36).pack(side="right", padx=6)
 
+        progress_frame = ctk.CTkFrame(right)
+        progress_frame.pack(fill="x", padx=10, pady=(10, 0))
+        self.progress_bar = ctk.CTkProgressBar(progress_frame)
+        self.progress_bar.pack(fill="x", padx=6, pady=(6, 4))
+        self.progress_bar.set(0)
+        self.progress_label = ctk.CTkLabel(progress_frame, text="Очікування", anchor="w")
+        self.progress_label.pack(fill="x", padx=6, pady=(0, 6))
+
         self._reload_gen_tree()
+
+    def _progress_reset(self, message: str = "Очікування"):
+        bar = getattr(self, "progress_bar", None)
+        if bar is None:
+            return
+        if hasattr(bar, "stop"):
+            bar.stop()
+        bar.configure(mode="determinate")
+        bar.set(0)
+        label = getattr(self, "progress_label", None)
+        if label is not None and message is not None:
+            label.configure(text=message)
+        self.update_idletasks()
+
+    def _progress_update(self, current: int, total: int, stage: str = "Генерація"):
+        bar = getattr(self, "progress_bar", None)
+        if bar is None:
+            return
+        total = total or 0
+        if total > 0:
+            fraction = max(0.0, min(float(current) / float(total), 1.0))
+        else:
+            fraction = 0.0
+        bar.configure(mode="determinate")
+        bar.set(fraction)
+        label = getattr(self, "progress_label", None)
+        if label is not None:
+            if total > 0:
+                text = f"{stage}: {current} з {total}"
+            else:
+                text = f"{stage}: {current}"
+            label.configure(text=text)
+        self.update_idletasks()
+
+    def _progress_message(self, message: str):
+        label = getattr(self, "progress_label", None)
+        if label is not None and message is not None:
+            label.configure(text=message)
+        self.update_idletasks()
+
+    def _progress_finish(self, message: str = "Готово"):
+        bar = getattr(self, "progress_bar", None)
+        if bar is not None:
+            if hasattr(bar, "stop"):
+                bar.stop()
+            bar.configure(mode="determinate")
+            bar.set(1)
+        label = getattr(self, "progress_label", None)
+        if label is not None and message is not None:
+            label.configure(text=message)
+        self.update_idletasks()
 
     def _reload_gen_tree(self):
         tree = getattr(self, "_gen_tree", None)
@@ -2130,12 +2258,14 @@ class App(ctk.CTk):
         if folder: self.out_folder_var.set(folder)
 
     def _generate(self):
+        self._progress_reset("Підготовка...")
         # зберегти (на випадок якщо змінювали шаблони перед тим)
         self._save_title_tags(show_message=False)
         self._export_apply_detail(save_to_file=False)
 
         selected_types = [name for name, var in self.ft_vars if var.get()]
         if not selected_types:
+            self._progress_reset("Очікування")
             return show_error("Оберіть хоча б один тип плівки.")
 
         # оновимо enabled у файлі шаблонів
@@ -2148,6 +2278,11 @@ class App(ctk.CTk):
 
         # вибір моделей через дерево
         selected_models = sorted(self._collect_checked_model_ids())
+        self._progress_message("Генерація даних...")
+
+        def progress_callback(current, total):
+            self._progress_update(current, total, stage="Генерація")
+
         try:
             if selected_models:
                 records, columns = generate_export_rows(
@@ -2156,6 +2291,7 @@ class App(ctk.CTk):
                     self.title_tags_templates,
                     self.export_fields,
                     model_ids=selected_models,
+                    progress_callback=progress_callback,
                 )
             else:
                 records, columns = generate_export_rows(
@@ -2163,14 +2299,18 @@ class App(ctk.CTk):
                     self.templates,
                     self.title_tags_templates,
                     self.export_fields,
+                    progress_callback=progress_callback,
                 )
         except ValueError as err:
+            self._progress_reset("Помилка генерації")
             return show_error(str(err))
 
         if not records:
+            self._progress_reset("Очікування")
             return show_error("Немає даних для генерації (перевірте моделі).")
 
         # експорт
+        self._progress_message("Експорт файлів...")
         try:
             products_file = export_products(
                 records,
@@ -2179,8 +2319,10 @@ class App(ctk.CTk):
                 self.out_folder_var.get().strip(),
             )
         except Exception as e:
+            self._progress_reset("Помилка експорту")
             return show_error(f"Не вдалося зберегти файли: {e}")
 
+        self._progress_finish(f"Готово: {len(records)} рядків")
         msg = f"✅ Згенеровано {len(records)} рядків.\nФайл експорту: {products_file}"
         show_info(msg)
 
