@@ -298,6 +298,64 @@ class FormulaEngine:
         cls.FUNCTIONS[name.upper()] = func
 
     @classmethod
+    def _prepare_formula(cls, formula: str) -> Tuple[Optional[str], bool]:
+        expression = formula.strip()
+        if not expression:
+            return None, True
+        if expression.startswith('='):
+            expression = expression[1:]
+            if not expression.strip():
+                return None, True
+            expression = expression.strip()
+        return expression, False
+
+    @classmethod
+    def _parse_tokens(cls, expression: str) -> Any:
+        tokenizer = _Tokenizer(expression)
+        tokens = tokenizer.tokenize()
+        parser = _Parser(tokens)
+        return parser.parse()
+
+    @classmethod
+    def parse(cls, formula: str) -> Any:
+        if formula is None:
+            raise FormulaError("Formula is empty.")
+        if not isinstance(formula, str):
+            raise FormulaError("Formula must be a string.")
+        expression, is_blank = cls._prepare_formula(formula)
+        if expression is None or is_blank:
+            raise FormulaError("Formula is empty.")
+        return cls._parse_tokens(expression)
+
+    @classmethod
+    def describe(cls, formula: str) -> Dict[str, Any]:
+        ast = cls.parse(formula)
+        variables: set[str] = set()
+        functions: set[str] = set()
+        cls._collect_metadata(ast, variables, functions)
+        return {"ast": ast, "variables": variables, "functions": functions}
+
+    @classmethod
+    def _collect_metadata(cls, node: Any, variables: set[str], functions: set[str]) -> None:
+        node_type = node[0]
+        if node_type == 'var':
+            variables.add(node[1])
+            return
+        if node_type == 'func':
+            functions.add(node[1])
+            for arg in node[2]:
+                cls._collect_metadata(arg, variables, functions)
+            return
+        if node_type == 'unary':
+            cls._collect_metadata(node[2], variables, functions)
+            return
+        if node_type in ('binop', 'compare'):
+            cls._collect_metadata(node[2], variables, functions)
+            cls._collect_metadata(node[3], variables, functions)
+            return
+
+    @classmethod
+
     def evaluate(cls, formula: str, context: Optional[Mapping[str, Any]] = None) -> Any:
         """Evaluate a single formula using the supplied context."""
 
@@ -305,17 +363,10 @@ class FormulaEngine:
             return None
         if not isinstance(formula, str):
             return formula
-        expression = formula.strip()
-        if not expression:
+        expression, is_blank = cls._prepare_formula(formula)
+        if expression is None or is_blank:
             return ''
-        if expression.startswith('='):
-            expression = expression[1:]
-            if not expression.strip():
-                return ''
-        tokenizer = _Tokenizer(expression)
-        tokens = tokenizer.tokenize()
-        parser = _Parser(tokens)
-        ast = parser.parse()
+        ast = cls._parse_tokens(expression)
         eval_context = dict(context or {})
         return cls._evaluate_node(ast, eval_context)
 

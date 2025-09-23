@@ -13,6 +13,8 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from formula_engine import FormulaEngine, FormulaError
+
 
 def _show_dependency_error(message: str) -> None:
     """Display a blocking error for a missing runtime dependency."""
@@ -126,6 +128,7 @@ except ModuleNotFoundError:
         "Встановіть її командою 'pip install jinja2' і перезапустіть застосунок."
     )
     sys.exit(1)
+
 
 DB_FILE = "catalog.db"
 TEMPLATES_FILE = "templates.json"
@@ -715,6 +718,153 @@ def load_specs_map(model_ids):
         specs_map.setdefault(model_id, {})[key] = value
     return specs_map
 
+# ============================ ФОРМУЛИ ============================
+
+_FORMULA_PREFIX_RE = re.compile(r"^\s*=")
+_IDENTIFIER_SANITIZE_RE = re.compile(r"[^\w]+", re.UNICODE)
+_ASCII_SANITIZE_RE = re.compile(r"[^0-9a-z]+")
+
+_TRANSLIT_TABLE = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "h",
+    "ґ": "g",
+    "д": "d",
+    "е": "e",
+    "є": "ie",
+    "ж": "zh",
+    "з": "z",
+    "и": "y",
+    "і": "i",
+    "ї": "yi",
+    "й": "y",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "kh",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "shch",
+    "ь": "",
+    "ю": "yu",
+    "я": "ya",
+    "ъ": "",
+    "ы": "y",
+    "э": "e",
+    "ё": "yo",
+}
+
+_COMMON_SPEC_ALIAS = {
+    "color": "color",
+    "colour": "color",
+    "kolir": "color",
+    "колір": "color",
+    "цвет": "color",
+    "brand": "brand",
+    "бренд": "brand",
+    "weight": "weight",
+    "вага": "weight",
+    "вес": "weight",
+    "material": "material",
+    "матеріал": "material",
+    "материал": "material",
+    "thickness": "thickness",
+    "товщина": "thickness",
+    "толщина": "thickness",
+    "sku": "sku",
+    "код": "sku",
+    "код_товару": "sku",
+}
+
+
+def _looks_like_formula(text: str) -> bool:
+    return bool(text) and bool(_FORMULA_PREFIX_RE.match(text))
+
+
+def _normalize_identifier(value: str) -> str:
+    lowered = value.strip().lower()
+    cleaned = _IDENTIFIER_SANITIZE_RE.sub("_", lowered)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    return cleaned
+
+
+def _transliterate_ascii(value: str) -> str:
+    result = []
+    for ch in value.lower():
+        if ch.isdigit():
+            result.append(ch)
+            continue
+        if "a" <= ch <= "z":
+            result.append(ch)
+            continue
+        if ch in _TRANSLIT_TABLE:
+            result.append(_TRANSLIT_TABLE[ch])
+            continue
+        if ch == "_" or ch.isspace():
+            result.append("_")
+        else:
+            result.append("")
+    ascii_candidate = "".join(result)
+    ascii_candidate = _ASCII_SANITIZE_RE.sub("_", ascii_candidate)
+    ascii_candidate = re.sub(r"_+", "_", ascii_candidate).strip("_")
+    return ascii_candidate
+
+
+def _build_formula_context(base_context):
+    formula_context = {}
+    for key, value in base_context.items():
+        if callable(value):
+            continue
+        formula_context[key] = value
+
+    if "brand" in base_context and "attr_brand" not in formula_context:
+        formula_context["attr_brand"] = base_context.get("brand")
+    if "model" in base_context and "attr_model" not in formula_context:
+        formula_context["attr_model"] = base_context.get("model")
+
+    specs = base_context.get("specs")
+    if isinstance(specs, dict):
+        for spec_key, spec_value in specs.items():
+            if spec_value is None:
+                continue
+            key_str = str(spec_key)
+            normalized = _normalize_identifier(key_str)
+            ascii_name = _transliterate_ascii(key_str)
+            for candidate in (normalized, ascii_name):
+                if candidate:
+                    formula_context.setdefault(f"attr_{candidate}", spec_value)
+            alias_source = None
+            if ascii_name and ascii_name in _COMMON_SPEC_ALIAS:
+                alias_source = _COMMON_SPEC_ALIAS[ascii_name]
+            elif normalized and normalized in _COMMON_SPEC_ALIAS:
+                alias_source = _COMMON_SPEC_ALIAS[normalized]
+            if alias_source:
+                formula_context.setdefault(f"attr_{alias_source}", spec_value)
+
+    category_name = base_context.get("category")
+    if isinstance(category_name, str):
+        cat_slug = _transliterate_ascii(category_name) or _normalize_identifier(category_name)
+        if cat_slug:
+            formula_context.setdefault(f"category_{cat_slug}", category_name)
+
+    film_type = base_context.get("film_type")
+    if isinstance(film_type, str):
+        ft_slug = _transliterate_ascii(film_type) or _normalize_identifier(film_type)
+        if ft_slug:
+            formula_context.setdefault(f"film_type_{ft_slug}", film_type)
+
+    return formula_context
+
 # ============================ ГЕНЕРАЦІЯ ============================
 
 def _normalize_id_list(ids):
@@ -901,25 +1051,36 @@ def generate_export_rows(
             }
 
             record = {}
+            formula_context = None
             for field in enabled_fields:
                 field_name = field["field"]
                 tpl_str = field.get("template", "")
                 if tpl_str:
-                    tpl = field_template_cache.get(tpl_str)
-                    if tpl is None:
+                    if _looks_like_formula(tpl_str):
+                        if formula_context is None:
+                            formula_context = _build_formula_context(context)
                         try:
-                            tpl = Template(tpl_str)
+                            value = FormulaEngine.evaluate(tpl_str, formula_context)
+                        except FormulaError as exc:
+                            raise ValueError(
+                                f"Помилка у формулі поля \"{field_name}\": {exc}"
+                            ) from exc
+                    else:
+                        tpl = field_template_cache.get(tpl_str)
+                        if tpl is None:
+                            try:
+                                tpl = Template(tpl_str)
+                            except TemplateError as exc:
+                                raise ValueError(
+                                    f"Помилка в шаблоні поля \"{field_name}\": {exc}"
+                                ) from exc
+                            field_template_cache[tpl_str] = tpl
+                        try:
+                            value = tpl.render(**context)
                         except TemplateError as exc:
                             raise ValueError(
-                                f"Помилка в шаблоні поля \"{field_name}\": {exc}"
+                                f"Не вдалося згенерувати значення поля \"{field_name}\": {exc}"
                             ) from exc
-                        field_template_cache[tpl_str] = tpl
-                    try:
-                        value = tpl.render(**context)
-                    except TemplateError as exc:
-                        raise ValueError(
-                            f"Не вдалося згенерувати значення поля \"{field_name}\": {exc}"
-                        ) from exc
                 else:
                     value = context.get(field_name, "")
                 if value is None:
@@ -1856,17 +2017,30 @@ class App(ctk.CTk):
         )
         self.export_field_enabled_check.pack(anchor="w", padx=10, pady=(0, 8))
 
-        ctk.CTkLabel(detail, text="Шаблон (Jinja2)").pack(anchor="w", padx=10, pady=(0, 4))
+        ctk.CTkLabel(detail, text="Шаблон (формула =IF(...) або Jinja2)").pack(anchor="w", padx=10, pady=(0, 4))
         self.export_field_template = ctk.CTkTextbox(detail, height=220)
-        self.export_field_template.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        self.export_field_template.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        self.export_field_template.bind("<<Modified>>", self._on_export_template_modified)
 
         hint_text = (
-            "Доступні змінні: {{ brand }}, {{ model }}, {{ category }}, {{ film_type }}, {{ title }}, {{ description }}, {{ tags }}, "
-            "{{ spec('Назва') }}, {{ specs['Ключ'] }}, {{ row_number }}, {{ now }}."
+            "Почніть рядок зі знаком '=' щоб використати формулу у стилі Google Sheets (аргументи через ';').\n"
+            "Без '=' шаблон рендериться через Jinja2. Доступні змінні: {{ brand }}, {{ model }}, {{ category }}, {{ film_type }}, "
+            "{{ title }}, {{ description }}, {{ tags }}, {{ spec('Назва') }}, {{ specs['Ключ'] }}, {{ row_number }}, {{ now }}."
         )
         ctk.CTkLabel(detail, text=hint_text, justify="left", anchor="w", wraplength=360).pack(
-            fill="x", padx=10, pady=(0, 8)
+            fill="x", padx=10, pady=(0, 4)
         )
+
+        self.export_template_status = ctk.CTkLabel(
+            detail,
+            text="",
+            justify="left",
+            anchor="w",
+            wraplength=360,
+            text_color="#888888",
+        )
+        self.export_template_status.pack(fill="x", padx=10, pady=(0, 8))
+        self._update_template_status("")
 
         action_row = ctk.CTkFrame(detail)
         action_row.pack(fill="x", padx=10, pady=(0, 10))
@@ -1907,6 +2081,7 @@ class App(ctk.CTk):
             self.export_apply_button.configure(state=state)
         if hasattr(self, "export_field_template"):
             self.export_field_template.configure(state="normal" if enabled else "disabled")
+        self._update_template_status()
 
     def _load_export_field_detail(self, index):
         if index is None or index < 0 or index >= len(self.export_fields):
@@ -1920,6 +2095,7 @@ class App(ctk.CTk):
                 self.export_field_template.configure(state="normal")
                 self.export_field_template.delete("1.0", "end")
                 self.export_field_template.configure(state="disabled")
+            self._update_template_status("")
             return
 
         self._export_selected_index = index
@@ -1936,6 +2112,8 @@ class App(ctk.CTk):
         self.export_field_template.configure(state="normal")
         self.export_field_template.delete("1.0", "end")
         self.export_field_template.insert("1.0", str(template))
+        self.export_field_template.edit_modified(False)
+        self._update_template_status(template)
 
     def _on_export_field_select(self, _event):
         if getattr(self, "_export_tree_updating", False):
@@ -1955,6 +2133,64 @@ class App(ctk.CTk):
         else:
             self._load_export_field_detail(idx)
 
+    def _on_export_template_modified(self, _event):
+        widget = getattr(self, "export_field_template", None)
+        if widget is None:
+            return
+        try:
+            modified = bool(widget.edit_modified())
+        except Exception:
+            modified = True
+        if not modified:
+            return
+        try:
+            widget.edit_modified(False)
+        except Exception:
+            pass
+        text = widget.get("1.0", "end").rstrip()
+        self._update_template_status(text)
+
+    def _update_template_status(self, template_text: str | None = None):
+        label = getattr(self, "export_template_status", None)
+        if label is None:
+            return
+        if template_text is None:
+            widget = getattr(self, "export_field_template", None)
+            if widget is None:
+                template_text = ""
+            else:
+                template_text = widget.get("1.0", "end").rstrip()
+        message, color = self._analyze_template_text(template_text)
+        label.configure(text=message, text_color=color)
+
+    def _analyze_template_text(self, template_text: str):
+        trimmed = template_text.strip()
+        if not trimmed:
+            return (
+                "Введіть формулу (=IF(...)) або шаблон Jinja2. Аргументи формули розділяйте ';'.",
+                "#888888",
+            )
+        if _looks_like_formula(trimmed):
+            try:
+                info = FormulaEngine.describe(trimmed)
+            except FormulaError as exc:
+                return (f"❌ Помилка формули: {exc}", "#c94a4a")
+            variables = sorted(info.get("variables", []))
+            if variables:
+                vars_text = ", ".join(variables)
+                hint = f"Змінні: {vars_text}"
+            else:
+                hint = "Змінні не використовуються."
+            return (f"✅ Формула валідна. {hint}", "#4c9a2a")
+        try:
+            Template(trimmed)
+        except TemplateError as exc:
+            return (f"❌ Помилка шаблону Jinja2: {exc}", "#c94a4a")
+        return (
+            "ℹ️ Використовується шаблон Jinja2. Доступні змінні: {{ brand }}, {{ model }}, {{ category }}, {{ film_type }}, {{ title }}, {{ description }}, {{ tags }}, {{ row_number }}, {{ now }}.",
+            "#888888",
+        )
+
     def _export_apply_detail(self, save_to_file: bool):
         idx = getattr(self, "_export_selected_index", None)
         if idx is None or idx < 0 or idx >= len(self.export_fields):
@@ -1967,6 +2203,23 @@ class App(ctk.CTk):
         template = self.export_field_template.get("1.0", "end").rstrip()
         enabled = bool(self.export_field_enabled_var.get())
 
+        trimmed_template = template.strip()
+        if trimmed_template:
+            if _looks_like_formula(trimmed_template):
+                try:
+                    FormulaEngine.describe(trimmed_template)
+                except FormulaError as exc:
+                    show_error(f"Помилка у формулі: {exc}")
+                    self._update_template_status(template)
+                    return False
+            else:
+                try:
+                    Template(trimmed_template)
+                except TemplateError as exc:
+                    show_error(f"Помилка у шаблоні Jinja2: {exc}")
+                    self._update_template_status(template)
+                    return False
+
         changed = False
         if field.get("field") != name:
             field["field"] = name
@@ -1977,6 +2230,8 @@ class App(ctk.CTk):
         if bool(field.get("enabled")) != enabled:
             field["enabled"] = enabled
             changed = True
+
+        self._update_template_status(template)
 
         if changed:
             self._refresh_export_fields_tree(select_index=idx)
