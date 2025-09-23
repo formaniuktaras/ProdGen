@@ -1,18 +1,134 @@
 # -*- coding: utf-8 -*-
 import os
+import csv
 import json
 import re
 import sqlite3
+import sys
 import time
+
+APP_TITLE = "Prom Generator"
+from copy import deepcopy
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-import customtkinter as ctk
-import pandas as pd
-from jinja2 import Template, TemplateError
+from formula_engine import FormulaEngine, FormulaError
 
-APP_TITLE = "Prom Generator"
+
+def _show_dependency_error(message: str) -> None:
+    """Display a blocking error for a missing runtime dependency."""
+
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(APP_TITLE, message)
+    except Exception:
+        print(message, file=sys.stderr)
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+DEPENDENCY_WARNINGS = []
+
+CSV_JSON_FALLBACK_NOTE = "\nЕкспорт у CSV (.csv) та JSON (.json) залишається доступним."
+PANDAS_INSTALL_HINT = (
+    "Встановіть бібліотеку командою 'pip install pandas' і перезапустіть застосунок, щоб увімкнути цей формат."
+)
+OPENPYXL_INSTALL_HINT = (
+    "Встановіть бібліотеку командою 'pip install openpyxl' і перезапустіть застосунок, щоб увімкнути цей формат."
+)
+
+try:
+    import customtkinter as ctk
+except ModuleNotFoundError:
+    _show_dependency_error(
+        "Бібліотека CustomTkinter не знайдена.\n"
+        "Встановіть її командою 'pip install customtkinter' і перезапустіть застосунок."
+    )
+    sys.exit(1)
+
+PANDAS_IMPORT_ERROR_DETAIL = ""
+PANDAS_EXPORT_BLOCKED_MESSAGE = ""
+EXCEL_ENGINE_IMPORT_ERROR_DETAIL = ""
+EXCEL_EXPORT_BLOCKED_MESSAGE = ""
+
+try:
+    import pandas as pd
+except ModuleNotFoundError as exc:
+    pd = None
+    PANDAS_IMPORT_ERROR_DETAIL = str(exc)
+    PANDAS_EXPORT_BLOCKED_MESSAGE = (
+        "Експорт у формат Excel (.xlsx) недоступний: бібліотека pandas не встановлена."
+    )
+except ImportError as exc:  # e.g. missing binary dependencies
+    pd = None
+    PANDAS_IMPORT_ERROR_DETAIL = str(exc)
+    PANDAS_EXPORT_BLOCKED_MESSAGE = (
+        "Експорт у формат Excel (.xlsx) недоступний: не вдалося завантажити бібліотеку pandas."
+    )
+else:
+    PANDAS_IMPORT_ERROR_DETAIL = ""
+    PANDAS_EXPORT_BLOCKED_MESSAGE = ""
+
+if PANDAS_EXPORT_BLOCKED_MESSAGE:
+    detail_suffix = f"\nДеталі: {PANDAS_IMPORT_ERROR_DETAIL}" if PANDAS_IMPORT_ERROR_DETAIL else ""
+    DEPENDENCY_WARNINGS.append(
+        PANDAS_EXPORT_BLOCKED_MESSAGE
+        + detail_suffix
+        + "\n"
+        + PANDAS_INSTALL_HINT
+        + CSV_JSON_FALLBACK_NOTE
+    )
+else:
+    PANDAS_IMPORT_ERROR_DETAIL = ""
+
+if pd is None:
+    EXCEL_EXPORT_BLOCKED_MESSAGE = PANDAS_EXPORT_BLOCKED_MESSAGE
+else:
+    try:
+        import openpyxl  # noqa: F401  # type: ignore[import-not-found]
+    except ModuleNotFoundError as exc:
+        EXCEL_ENGINE_IMPORT_ERROR_DETAIL = str(exc)
+        EXCEL_EXPORT_BLOCKED_MESSAGE = (
+            "Експорт у формат Excel (.xlsx) недоступний: бібліотека openpyxl не встановлена."
+        )
+    except ImportError as exc:
+        EXCEL_ENGINE_IMPORT_ERROR_DETAIL = str(exc)
+        EXCEL_EXPORT_BLOCKED_MESSAGE = (
+            "Експорт у формат Excel (.xlsx) недоступний: не вдалося завантажити бібліотеку openpyxl."
+        )
+
+if EXCEL_EXPORT_BLOCKED_MESSAGE and pd is not None:
+    detail_suffix = (
+        f"\nДеталі: {EXCEL_ENGINE_IMPORT_ERROR_DETAIL}"
+        if EXCEL_ENGINE_IMPORT_ERROR_DETAIL
+        else ""
+    )
+    DEPENDENCY_WARNINGS.append(
+        EXCEL_EXPORT_BLOCKED_MESSAGE
+        + detail_suffix
+        + "\n"
+        + OPENPYXL_INSTALL_HINT
+        + CSV_JSON_FALLBACK_NOTE
+    )
+else:
+    EXCEL_ENGINE_IMPORT_ERROR_DETAIL = ""
+
+try:
+    from jinja2 import Template, TemplateError
+except ModuleNotFoundError:
+    _show_dependency_error(
+        "Бібліотека Jinja2 не знайдена.\n"
+        "Встановіть її командою 'pip install jinja2' і перезапустіть застосунок."
+    )
+    sys.exit(1)
+
 DB_FILE = "catalog.db"
 TEMPLATES_FILE = "templates.json"
 EXPORT_FIELDS_FILE = "export_fields.json"
@@ -110,6 +226,17 @@ DEFAULT_EXPORT_FIELDS = [
     {"field": "Значення_Характеристики", "enabled": False, "template": "{{ spec_items | map(attribute=1) | join('; ') }}"},
 ]
 
+EXCEL_FORMAT_LABEL = "Excel (.xlsx)"
+CSV_FORMAT_LABEL = "CSV (.csv)"
+JSON_FORMAT_LABEL = "JSON (.json)"
+EXPORT_FORMAT_OPTIONS = (EXCEL_FORMAT_LABEL, CSV_FORMAT_LABEL, JSON_FORMAT_LABEL)
+
+
+def get_available_export_formats():
+    if pd is None or EXCEL_EXPORT_BLOCKED_MESSAGE:
+        return [fmt for fmt in EXPORT_FORMAT_OPTIONS if fmt != EXCEL_FORMAT_LABEL]
+    return list(EXPORT_FORMAT_OPTIONS)
+
 def _title_tags_block(title: str, tags: str) -> dict:
     return {
         "title_template": title,
@@ -125,15 +252,27 @@ def _build_title_tags_defaults(film_type_names, base_title, base_tags):
 
 def load_templates():
     if not os.path.exists(TEMPLATES_FILE):
-        with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
-            json.dump(DEFAULT_TEMPLATES, f, ensure_ascii=False, indent=2)
-        return DEFAULT_TEMPLATES.copy()
-    with open(TEMPLATES_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        defaults = deepcopy(DEFAULT_TEMPLATES)
+        save_templates(defaults)
+        return defaults
+
+    try:
+        with open(TEMPLATES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        defaults = deepcopy(DEFAULT_TEMPLATES)
+        save_templates(defaults)
+        return defaults
+
+    if not isinstance(data, dict):
+        defaults = deepcopy(DEFAULT_TEMPLATES)
+        save_templates(defaults)
+        return defaults
+
     # гарантуємо всі ключі
     for k, v in DEFAULT_TEMPLATES.items():
         if k not in data:
-            data[k] = v
+            data[k] = deepcopy(v)
     return data
 
 def save_templates(dct):
@@ -578,6 +717,153 @@ def load_specs_map(model_ids):
         specs_map.setdefault(model_id, {})[key] = value
     return specs_map
 
+# ============================ ФОРМУЛИ ============================
+
+_FORMULA_PREFIX_RE = re.compile(r"^\s*=")
+_IDENTIFIER_SANITIZE_RE = re.compile(r"[^\w]+", re.UNICODE)
+_ASCII_SANITIZE_RE = re.compile(r"[^0-9a-z]+")
+
+_TRANSLIT_TABLE = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "h",
+    "ґ": "g",
+    "д": "d",
+    "е": "e",
+    "є": "ie",
+    "ж": "zh",
+    "з": "z",
+    "и": "y",
+    "і": "i",
+    "ї": "yi",
+    "й": "y",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "kh",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "shch",
+    "ь": "",
+    "ю": "yu",
+    "я": "ya",
+    "ъ": "",
+    "ы": "y",
+    "э": "e",
+    "ё": "yo",
+}
+
+_COMMON_SPEC_ALIAS = {
+    "color": "color",
+    "colour": "color",
+    "kolir": "color",
+    "колір": "color",
+    "цвет": "color",
+    "brand": "brand",
+    "бренд": "brand",
+    "weight": "weight",
+    "вага": "weight",
+    "вес": "weight",
+    "material": "material",
+    "матеріал": "material",
+    "материал": "material",
+    "thickness": "thickness",
+    "товщина": "thickness",
+    "толщина": "thickness",
+    "sku": "sku",
+    "код": "sku",
+    "код_товару": "sku",
+}
+
+
+def _looks_like_formula(text: str) -> bool:
+    return bool(text) and bool(_FORMULA_PREFIX_RE.match(text))
+
+
+def _normalize_identifier(value: str) -> str:
+    lowered = value.strip().lower()
+    cleaned = _IDENTIFIER_SANITIZE_RE.sub("_", lowered)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    return cleaned
+
+
+def _transliterate_ascii(value: str) -> str:
+    result = []
+    for ch in value.lower():
+        if ch.isdigit():
+            result.append(ch)
+            continue
+        if "a" <= ch <= "z":
+            result.append(ch)
+            continue
+        if ch in _TRANSLIT_TABLE:
+            result.append(_TRANSLIT_TABLE[ch])
+            continue
+        if ch == "_" or ch.isspace():
+            result.append("_")
+        else:
+            result.append("")
+    ascii_candidate = "".join(result)
+    ascii_candidate = _ASCII_SANITIZE_RE.sub("_", ascii_candidate)
+    ascii_candidate = re.sub(r"_+", "_", ascii_candidate).strip("_")
+    return ascii_candidate
+
+
+def _build_formula_context(base_context):
+    formula_context = {}
+    for key, value in base_context.items():
+        if callable(value):
+            continue
+        formula_context[key] = value
+
+    if "brand" in base_context and "attr_brand" not in formula_context:
+        formula_context["attr_brand"] = base_context.get("brand")
+    if "model" in base_context and "attr_model" not in formula_context:
+        formula_context["attr_model"] = base_context.get("model")
+
+    specs = base_context.get("specs")
+    if isinstance(specs, dict):
+        for spec_key, spec_value in specs.items():
+            if spec_value is None:
+                continue
+            key_str = str(spec_key)
+            normalized = _normalize_identifier(key_str)
+            ascii_name = _transliterate_ascii(key_str)
+            for candidate in (normalized, ascii_name):
+                if candidate:
+                    formula_context.setdefault(f"attr_{candidate}", spec_value)
+            alias_source = None
+            if ascii_name and ascii_name in _COMMON_SPEC_ALIAS:
+                alias_source = _COMMON_SPEC_ALIAS[ascii_name]
+            elif normalized and normalized in _COMMON_SPEC_ALIAS:
+                alias_source = _COMMON_SPEC_ALIAS[normalized]
+            if alias_source:
+                formula_context.setdefault(f"attr_{alias_source}", spec_value)
+
+    category_name = base_context.get("category")
+    if isinstance(category_name, str):
+        cat_slug = _transliterate_ascii(category_name) or _normalize_identifier(category_name)
+        if cat_slug:
+            formula_context.setdefault(f"category_{cat_slug}", category_name)
+
+    film_type = base_context.get("film_type")
+    if isinstance(film_type, str):
+        ft_slug = _transliterate_ascii(film_type) or _normalize_identifier(film_type)
+        if ft_slug:
+            formula_context.setdefault(f"film_type_{ft_slug}", film_type)
+
+    return formula_context
+
 # ============================ ГЕНЕРАЦІЯ ============================
 
 def _normalize_id_list(ids):
@@ -651,7 +937,9 @@ def generate_export_rows(
     category_ids=None,
     brand_ids=None,
     model_ids=None,
+    progress_callback=None,
 ):
+    film_types = list(film_types)
     pairs = collect_models(category_ids=category_ids, brand_ids=brand_ids, model_ids=model_ids)
     if not pairs:
         return [], []
@@ -684,6 +972,11 @@ def generate_export_rows(
     column_order = [field["field"] for field in enabled_fields]
 
     descriptions = templates.get("descriptions", {})
+
+    total_steps = len(pairs) * len(film_types)
+    progress_count = 0
+    if progress_callback is not None:
+        progress_callback(progress_count, total_steps)
 
     for brand, model, cat, mid, brand_id, cat_id in pairs:
         specs = specs_map.get(mid, {})
@@ -757,25 +1050,36 @@ def generate_export_rows(
             }
 
             record = {}
+            formula_context = None
             for field in enabled_fields:
                 field_name = field["field"]
                 tpl_str = field.get("template", "")
                 if tpl_str:
-                    tpl = field_template_cache.get(tpl_str)
-                    if tpl is None:
+                    if _looks_like_formula(tpl_str):
+                        if formula_context is None:
+                            formula_context = _build_formula_context(context)
                         try:
-                            tpl = Template(tpl_str)
+                            value = FormulaEngine.evaluate(tpl_str, formula_context)
+                        except FormulaError as exc:
+                            raise ValueError(
+                                f"Помилка у формулі поля \"{field_name}\": {exc}"
+                            ) from exc
+                    else:
+                        tpl = field_template_cache.get(tpl_str)
+                        if tpl is None:
+                            try:
+                                tpl = Template(tpl_str)
+                            except TemplateError as exc:
+                                raise ValueError(
+                                    f"Помилка в шаблоні поля \"{field_name}\": {exc}"
+                                ) from exc
+                            field_template_cache[tpl_str] = tpl
+                        try:
+                            value = tpl.render(**context)
                         except TemplateError as exc:
                             raise ValueError(
-                                f"Помилка в шаблоні поля \"{field_name}\": {exc}"
+                                f"Не вдалося згенерувати значення поля \"{field_name}\": {exc}"
                             ) from exc
-                        field_template_cache[tpl_str] = tpl
-                    try:
-                        value = tpl.render(**context)
-                    except TemplateError as exc:
-                        raise ValueError(
-                            f"Не вдалося згенерувати значення поля \"{field_name}\": {exc}"
-                        ) from exc
                 else:
                     value = context.get(field_name, "")
                 if value is None:
@@ -784,6 +1088,9 @@ def generate_export_rows(
                     value = str(value)
                 record[field_name] = value
             rows.append(record)
+            progress_count += 1
+            if progress_callback is not None:
+                progress_callback(progress_count, total_steps)
 
     return rows, column_order
 
@@ -792,16 +1099,53 @@ def export_products(records: list, columns: list, fmt: str, folder: str):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     base = os.path.join(folder, f"products_{ts}")
 
-    if fmt == "Excel (.xlsx)":
+    if fmt == EXCEL_FORMAT_LABEL:
+        if pd is None or EXCEL_EXPORT_BLOCKED_MESSAGE:
+            if pd is None:
+                message = PANDAS_EXPORT_BLOCKED_MESSAGE or "Експорт у Excel недоступний."
+                detail = PANDAS_IMPORT_ERROR_DETAIL
+                install_hint = PANDAS_INSTALL_HINT
+            else:
+                message = EXCEL_EXPORT_BLOCKED_MESSAGE or "Експорт у Excel недоступний."
+                detail = EXCEL_ENGINE_IMPORT_ERROR_DETAIL
+                install_hint = OPENPYXL_INSTALL_HINT
+            if detail and detail not in message:
+                message = f"{message} (деталі: {detail})"
+            message = f"{message}\n{install_hint}{CSV_JSON_FALLBACK_NOTE}"
+            raise RuntimeError(message)
         out_products = base + ".xlsx"
-        pd.DataFrame.from_records(records, columns=columns).to_excel(out_products, index=False)
-    elif fmt == "CSV (.csv)":
+        df = pd.DataFrame.from_records(records, columns=columns)
+        try:
+            df.to_excel(out_products, index=False)
+        except (ImportError, ModuleNotFoundError) as exc:
+            exc_text = str(exc)
+            if "openpyxl" in exc_text.lower():
+                message = (
+                    "Не вдалося зберегти Excel-файл: бібліотека openpyxl не встановлена або пошкоджена.\n"
+                    "Встановіть її командою 'pip install openpyxl' і перезапустіть застосунок, або оберіть інший формат експорту."
+                )
+                raise RuntimeError(message) from exc
+            raise
+    elif fmt == CSV_FORMAT_LABEL:
         out_products = base + ".csv"
-        pd.DataFrame.from_records(records, columns=columns).to_csv(out_products, index=False, encoding="utf-8-sig")
-    else:
+        if pd is not None:
+            pd.DataFrame.from_records(records, columns=columns).to_csv(
+                out_products, index=False, encoding="utf-8-sig"
+            )
+        else:
+            with open(out_products, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                if columns:
+                    writer.writerow(columns)
+                for record in records:
+                    row = [record.get(col, "") for col in columns]
+                    writer.writerow(row)
+    elif fmt == JSON_FORMAT_LABEL:
         out_products = base + ".json"
         with open(out_products, "w", encoding="utf-8") as f:
             json.dump(records, f, ensure_ascii=False, indent=2)
+    else:
+        raise ValueError(f"Невідомий формат експорту: {fmt}")
 
     return out_products
 
@@ -1024,6 +1368,8 @@ class App(ctk.CTk):
         self._rename_delay_max = 4.0
         self._export_selected_index = None
         self._export_tree_updating = False
+        self.progress_bar = None
+        self.progress_label = None
 
         self._build_header()
         self._build_tabs()
@@ -1031,6 +1377,9 @@ class App(ctk.CTk):
         # Початкові дані
         self._refresh_categories()
         self._refresh_filmtype_checkboxes()
+
+        if DEPENDENCY_WARNINGS:
+            self.after(200, self._show_dependency_warnings)
 
     # -------- верхній бар
     def _build_header(self):
@@ -1058,6 +1407,11 @@ class App(ctk.CTk):
         self._build_tab_templates()
         self._build_tab_export()
         self._build_tab_generate()
+
+    def _show_dependency_warnings(self):
+        for warning in DEPENDENCY_WARNINGS:
+            messagebox.showwarning(APP_TITLE, warning)
+        DEPENDENCY_WARNINGS.clear()
 
     def _film_type_names(self):
         return [item.get("name") for item in self.templates.get("film_types", []) if item.get("name")]
@@ -1662,17 +2016,30 @@ class App(ctk.CTk):
         )
         self.export_field_enabled_check.pack(anchor="w", padx=10, pady=(0, 8))
 
-        ctk.CTkLabel(detail, text="Шаблон (Jinja2)").pack(anchor="w", padx=10, pady=(0, 4))
+        ctk.CTkLabel(detail, text="Шаблон (формула =IF(...) або Jinja2)").pack(anchor="w", padx=10, pady=(0, 4))
         self.export_field_template = ctk.CTkTextbox(detail, height=220)
-        self.export_field_template.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        self.export_field_template.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        self.export_field_template.bind("<<Modified>>", self._on_export_template_modified)
 
         hint_text = (
-            "Доступні змінні: {{ brand }}, {{ model }}, {{ category }}, {{ film_type }}, {{ title }}, {{ description }}, {{ tags }}, "
-            "{{ spec('Назва') }}, {{ specs['Ключ'] }}, {{ row_number }}, {{ now }}."
+            "Почніть рядок зі знаком '=' щоб використати формулу у стилі Google Sheets (аргументи через ';').\n"
+            "Без '=' шаблон рендериться через Jinja2. Доступні змінні: {{ brand }}, {{ model }}, {{ category }}, {{ film_type }}, "
+            "{{ title }}, {{ description }}, {{ tags }}, {{ spec('Назва') }}, {{ specs['Ключ'] }}, {{ row_number }}, {{ now }}."
         )
         ctk.CTkLabel(detail, text=hint_text, justify="left", anchor="w", wraplength=360).pack(
-            fill="x", padx=10, pady=(0, 8)
+            fill="x", padx=10, pady=(0, 4)
         )
+
+        self.export_template_status = ctk.CTkLabel(
+            detail,
+            text="",
+            justify="left",
+            anchor="w",
+            wraplength=360,
+            text_color="#888888",
+        )
+        self.export_template_status.pack(fill="x", padx=10, pady=(0, 8))
+        self._update_template_status("")
 
         action_row = ctk.CTkFrame(detail)
         action_row.pack(fill="x", padx=10, pady=(0, 10))
@@ -1713,6 +2080,7 @@ class App(ctk.CTk):
             self.export_apply_button.configure(state=state)
         if hasattr(self, "export_field_template"):
             self.export_field_template.configure(state="normal" if enabled else "disabled")
+        self._update_template_status()
 
     def _load_export_field_detail(self, index):
         if index is None or index < 0 or index >= len(self.export_fields):
@@ -1726,6 +2094,7 @@ class App(ctk.CTk):
                 self.export_field_template.configure(state="normal")
                 self.export_field_template.delete("1.0", "end")
                 self.export_field_template.configure(state="disabled")
+            self._update_template_status("")
             return
 
         self._export_selected_index = index
@@ -1742,6 +2111,8 @@ class App(ctk.CTk):
         self.export_field_template.configure(state="normal")
         self.export_field_template.delete("1.0", "end")
         self.export_field_template.insert("1.0", str(template))
+        self.export_field_template.edit_modified(False)
+        self._update_template_status(template)
 
     def _on_export_field_select(self, _event):
         if getattr(self, "_export_tree_updating", False):
@@ -1761,6 +2132,64 @@ class App(ctk.CTk):
         else:
             self._load_export_field_detail(idx)
 
+    def _on_export_template_modified(self, _event):
+        widget = getattr(self, "export_field_template", None)
+        if widget is None:
+            return
+        try:
+            modified = bool(widget.edit_modified())
+        except Exception:
+            modified = True
+        if not modified:
+            return
+        try:
+            widget.edit_modified(False)
+        except Exception:
+            pass
+        text = widget.get("1.0", "end").rstrip()
+        self._update_template_status(text)
+
+    def _update_template_status(self, template_text: str | None = None):
+        label = getattr(self, "export_template_status", None)
+        if label is None:
+            return
+        if template_text is None:
+            widget = getattr(self, "export_field_template", None)
+            if widget is None:
+                template_text = ""
+            else:
+                template_text = widget.get("1.0", "end").rstrip()
+        message, color = self._analyze_template_text(template_text)
+        label.configure(text=message, text_color=color)
+
+    def _analyze_template_text(self, template_text: str):
+        trimmed = template_text.strip()
+        if not trimmed:
+            return (
+                "Введіть формулу (=IF(...)) або шаблон Jinja2. Аргументи формули розділяйте ';'.",
+                "#888888",
+            )
+        if _looks_like_formula(trimmed):
+            try:
+                info = FormulaEngine.describe(trimmed)
+            except FormulaError as exc:
+                return (f"❌ Помилка формули: {exc}", "#c94a4a")
+            variables = sorted(info.get("variables", []))
+            if variables:
+                vars_text = ", ".join(variables)
+                hint = f"Змінні: {vars_text}"
+            else:
+                hint = "Змінні не використовуються."
+            return (f"✅ Формула валідна. {hint}", "#4c9a2a")
+        try:
+            Template(trimmed)
+        except TemplateError as exc:
+            return (f"❌ Помилка шаблону Jinja2: {exc}", "#c94a4a")
+        return (
+            "ℹ️ Використовується шаблон Jinja2. Доступні змінні: {{ brand }}, {{ model }}, {{ category }}, {{ film_type }}, {{ title }}, {{ description }}, {{ tags }}, {{ row_number }}, {{ now }}.",
+            "#888888",
+        )
+
     def _export_apply_detail(self, save_to_file: bool):
         idx = getattr(self, "_export_selected_index", None)
         if idx is None or idx < 0 or idx >= len(self.export_fields):
@@ -1773,6 +2202,23 @@ class App(ctk.CTk):
         template = self.export_field_template.get("1.0", "end").rstrip()
         enabled = bool(self.export_field_enabled_var.get())
 
+        trimmed_template = template.strip()
+        if trimmed_template:
+            if _looks_like_formula(trimmed_template):
+                try:
+                    FormulaEngine.describe(trimmed_template)
+                except FormulaError as exc:
+                    show_error(f"Помилка у формулі: {exc}")
+                    self._update_template_status(template)
+                    return False
+            else:
+                try:
+                    Template(trimmed_template)
+                except TemplateError as exc:
+                    show_error(f"Помилка у шаблоні Jinja2: {exc}")
+                    self._update_template_status(template)
+                    return False
+
         changed = False
         if field.get("field") != name:
             field["field"] = name
@@ -1783,6 +2229,8 @@ class App(ctk.CTk):
         if bool(field.get("enabled")) != enabled:
             field["enabled"] = enabled
             changed = True
+
+        self._update_template_status(template)
 
         if changed:
             self._refresh_export_fields_tree(select_index=idx)
@@ -1896,10 +2344,14 @@ class App(ctk.CTk):
         fmt_frame = ctk.CTkFrame(right)
         fmt_frame.pack(fill="x", padx=10, pady=(6, 6))
         ctk.CTkLabel(fmt_frame, text="Формат експорту:").pack(anchor="w", padx=6, pady=(4, 4))
-        self.export_fmt_var = tk.StringVar(value="Excel (.xlsx)")
+        export_formats = get_available_export_formats()
+        if not export_formats:
+            export_formats = ["JSON (.json)"]
+        default_format = export_formats[0]
+        self.export_fmt_var = tk.StringVar(value=default_format)
         self.export_fmt_menu = ctk.CTkOptionMenu(
             fmt_frame,
-            values=["Excel (.xlsx)", "CSV (.csv)", "JSON (.json)"],
+            values=export_formats,
             variable=self.export_fmt_var,
             width=200,
         )
@@ -1924,7 +2376,66 @@ class App(ctk.CTk):
         action_row.pack(fill="x", padx=10, pady=(6, 0))
         ctk.CTkButton(action_row, text="Згенерувати", command=self._generate, height=36).pack(side="right", padx=6)
 
+        progress_frame = ctk.CTkFrame(right)
+        progress_frame.pack(fill="x", padx=10, pady=(10, 0))
+        self.progress_bar = ctk.CTkProgressBar(progress_frame)
+        self.progress_bar.pack(fill="x", padx=6, pady=(6, 4))
+        self.progress_bar.set(0)
+        self.progress_label = ctk.CTkLabel(progress_frame, text="Очікування", anchor="w")
+        self.progress_label.pack(fill="x", padx=6, pady=(0, 6))
+
         self._reload_gen_tree()
+
+    def _progress_reset(self, message: str = "Очікування"):
+        bar = getattr(self, "progress_bar", None)
+        if bar is None:
+            return
+        if hasattr(bar, "stop"):
+            bar.stop()
+        bar.configure(mode="determinate")
+        bar.set(0)
+        label = getattr(self, "progress_label", None)
+        if label is not None and message is not None:
+            label.configure(text=message)
+        self.update_idletasks()
+
+    def _progress_update(self, current: int, total: int, stage: str = "Генерація"):
+        bar = getattr(self, "progress_bar", None)
+        if bar is None:
+            return
+        total = total or 0
+        if total > 0:
+            fraction = max(0.0, min(float(current) / float(total), 1.0))
+        else:
+            fraction = 0.0
+        bar.configure(mode="determinate")
+        bar.set(fraction)
+        label = getattr(self, "progress_label", None)
+        if label is not None:
+            if total > 0:
+                text = f"{stage}: {current} з {total}"
+            else:
+                text = f"{stage}: {current}"
+            label.configure(text=text)
+        self.update_idletasks()
+
+    def _progress_message(self, message: str):
+        label = getattr(self, "progress_label", None)
+        if label is not None and message is not None:
+            label.configure(text=message)
+        self.update_idletasks()
+
+    def _progress_finish(self, message: str = "Готово"):
+        bar = getattr(self, "progress_bar", None)
+        if bar is not None:
+            if hasattr(bar, "stop"):
+                bar.stop()
+            bar.configure(mode="determinate")
+            bar.set(1)
+        label = getattr(self, "progress_label", None)
+        if label is not None and message is not None:
+            label.configure(text=message)
+        self.update_idletasks()
 
     def _reload_gen_tree(self):
         tree = getattr(self, "_gen_tree", None)
@@ -2130,12 +2641,14 @@ class App(ctk.CTk):
         if folder: self.out_folder_var.set(folder)
 
     def _generate(self):
+        self._progress_reset("Підготовка...")
         # зберегти (на випадок якщо змінювали шаблони перед тим)
         self._save_title_tags(show_message=False)
         self._export_apply_detail(save_to_file=False)
 
         selected_types = [name for name, var in self.ft_vars if var.get()]
         if not selected_types:
+            self._progress_reset("Очікування")
             return show_error("Оберіть хоча б один тип плівки.")
 
         # оновимо enabled у файлі шаблонів
@@ -2148,6 +2661,11 @@ class App(ctk.CTk):
 
         # вибір моделей через дерево
         selected_models = sorted(self._collect_checked_model_ids())
+        self._progress_message("Генерація даних...")
+
+        def progress_callback(current, total):
+            self._progress_update(current, total, stage="Генерація")
+
         try:
             if selected_models:
                 records, columns = generate_export_rows(
@@ -2156,6 +2674,7 @@ class App(ctk.CTk):
                     self.title_tags_templates,
                     self.export_fields,
                     model_ids=selected_models,
+                    progress_callback=progress_callback,
                 )
             else:
                 records, columns = generate_export_rows(
@@ -2163,14 +2682,18 @@ class App(ctk.CTk):
                     self.templates,
                     self.title_tags_templates,
                     self.export_fields,
+                    progress_callback=progress_callback,
                 )
         except ValueError as err:
+            self._progress_reset("Помилка генерації")
             return show_error(str(err))
 
         if not records:
+            self._progress_reset("Очікування")
             return show_error("Немає даних для генерації (перевірте моделі).")
 
         # експорт
+        self._progress_message("Експорт файлів...")
         try:
             products_file = export_products(
                 records,
@@ -2179,8 +2702,10 @@ class App(ctk.CTk):
                 self.out_folder_var.get().strip(),
             )
         except Exception as e:
+            self._progress_reset("Помилка експорту")
             return show_error(f"Не вдалося зберегти файли: {e}")
 
+        self._progress_finish(f"Готово: {len(records)} рядків")
         msg = f"✅ Згенеровано {len(records)} рядків.\nФайл експорту: {products_file}"
         show_info(msg)
 
