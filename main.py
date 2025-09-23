@@ -129,6 +129,7 @@ except ModuleNotFoundError:
     )
     sys.exit(1)
 
+
 DB_FILE = "catalog.db"
 TEMPLATES_FILE = "templates.json"
 EXPORT_FIELDS_FILE = "export_fields.json"
