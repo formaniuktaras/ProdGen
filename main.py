@@ -34,6 +34,14 @@ def _show_dependency_error(message: str) -> None:
 
 DEPENDENCY_WARNINGS = []
 
+CSV_JSON_FALLBACK_NOTE = "\nЕкспорт у CSV (.csv) та JSON (.json) залишається доступним."
+PANDAS_INSTALL_HINT = (
+    "Встановіть бібліотеку командою 'pip install pandas' і перезапустіть застосунок, щоб увімкнути цей формат."
+)
+OPENPYXL_INSTALL_HINT = (
+    "Встановіть бібліотеку командою 'pip install openpyxl' і перезапустіть застосунок, щоб увімкнути цей формат."
+)
+
 try:
     import customtkinter as ctk
 except ModuleNotFoundError:
@@ -45,6 +53,8 @@ except ModuleNotFoundError:
 
 PANDAS_IMPORT_ERROR_DETAIL = ""
 PANDAS_EXPORT_BLOCKED_MESSAGE = ""
+EXCEL_ENGINE_IMPORT_ERROR_DETAIL = ""
+EXCEL_EXPORT_BLOCKED_MESSAGE = ""
 
 try:
     import pandas as pd
@@ -69,11 +79,44 @@ if PANDAS_EXPORT_BLOCKED_MESSAGE:
     DEPENDENCY_WARNINGS.append(
         PANDAS_EXPORT_BLOCKED_MESSAGE
         + detail_suffix
-        + "\nВстановіть бібліотеку командою 'pip install pandas' і перезапустіть застосунок, щоб увімкнути цей формат."
-        + "\nЕкспорт у CSV (.csv) та JSON (.json) залишається доступним."
+        + "\n"
+        + PANDAS_INSTALL_HINT
+        + CSV_JSON_FALLBACK_NOTE
     )
 else:
     PANDAS_IMPORT_ERROR_DETAIL = ""
+
+if pd is None:
+    EXCEL_EXPORT_BLOCKED_MESSAGE = PANDAS_EXPORT_BLOCKED_MESSAGE
+else:
+    try:
+        import openpyxl  # noqa: F401  # type: ignore[import-not-found]
+    except ModuleNotFoundError as exc:
+        EXCEL_ENGINE_IMPORT_ERROR_DETAIL = str(exc)
+        EXCEL_EXPORT_BLOCKED_MESSAGE = (
+            "Експорт у формат Excel (.xlsx) недоступний: бібліотека openpyxl не встановлена."
+        )
+    except ImportError as exc:
+        EXCEL_ENGINE_IMPORT_ERROR_DETAIL = str(exc)
+        EXCEL_EXPORT_BLOCKED_MESSAGE = (
+            "Експорт у формат Excel (.xlsx) недоступний: не вдалося завантажити бібліотеку openpyxl."
+        )
+
+if EXCEL_EXPORT_BLOCKED_MESSAGE and pd is not None:
+    detail_suffix = (
+        f"\nДеталі: {EXCEL_ENGINE_IMPORT_ERROR_DETAIL}"
+        if EXCEL_ENGINE_IMPORT_ERROR_DETAIL
+        else ""
+    )
+    DEPENDENCY_WARNINGS.append(
+        EXCEL_EXPORT_BLOCKED_MESSAGE
+        + detail_suffix
+        + "\n"
+        + OPENPYXL_INSTALL_HINT
+        + CSV_JSON_FALLBACK_NOTE
+    )
+else:
+    EXCEL_ENGINE_IMPORT_ERROR_DETAIL = ""
 
 try:
     from jinja2 import Template, TemplateError
@@ -181,12 +224,15 @@ DEFAULT_EXPORT_FIELDS = [
     {"field": "Значення_Характеристики", "enabled": False, "template": "{{ spec_items | map(attribute=1) | join('; ') }}"},
 ]
 
-EXPORT_FORMAT_OPTIONS = ("Excel (.xlsx)", "CSV (.csv)", "JSON (.json)")
+EXCEL_FORMAT_LABEL = "Excel (.xlsx)"
+CSV_FORMAT_LABEL = "CSV (.csv)"
+JSON_FORMAT_LABEL = "JSON (.json)"
+EXPORT_FORMAT_OPTIONS = (EXCEL_FORMAT_LABEL, CSV_FORMAT_LABEL, JSON_FORMAT_LABEL)
 
 
 def get_available_export_formats():
-    if pd is None:
-        return [fmt for fmt in EXPORT_FORMAT_OPTIONS if fmt != "Excel (.xlsx)"]
+    if pd is None or EXCEL_EXPORT_BLOCKED_MESSAGE:
+        return [fmt for fmt in EXPORT_FORMAT_OPTIONS if fmt != EXCEL_FORMAT_LABEL]
     return list(EXPORT_FORMAT_OPTIONS)
 
 def _title_tags_block(title: str, tags: str) -> dict:
@@ -893,15 +939,34 @@ def export_products(records: list, columns: list, fmt: str, folder: str):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     base = os.path.join(folder, f"products_{ts}")
 
-    if fmt == "Excel (.xlsx)":
-        if pd is None:
-            message = PANDAS_EXPORT_BLOCKED_MESSAGE or "Експорт у Excel недоступний."
-            if PANDAS_IMPORT_ERROR_DETAIL and PANDAS_IMPORT_ERROR_DETAIL not in message:
-                message = f"{message} (деталі: {PANDAS_IMPORT_ERROR_DETAIL})"
+    if fmt == EXCEL_FORMAT_LABEL:
+        if pd is None or EXCEL_EXPORT_BLOCKED_MESSAGE:
+            if pd is None:
+                message = PANDAS_EXPORT_BLOCKED_MESSAGE or "Експорт у Excel недоступний."
+                detail = PANDAS_IMPORT_ERROR_DETAIL
+                install_hint = PANDAS_INSTALL_HINT
+            else:
+                message = EXCEL_EXPORT_BLOCKED_MESSAGE or "Експорт у Excel недоступний."
+                detail = EXCEL_ENGINE_IMPORT_ERROR_DETAIL
+                install_hint = OPENPYXL_INSTALL_HINT
+            if detail and detail not in message:
+                message = f"{message} (деталі: {detail})"
+            message = f"{message}\n{install_hint}{CSV_JSON_FALLBACK_NOTE}"
             raise RuntimeError(message)
         out_products = base + ".xlsx"
-        pd.DataFrame.from_records(records, columns=columns).to_excel(out_products, index=False)
-    elif fmt == "CSV (.csv)":
+        df = pd.DataFrame.from_records(records, columns=columns)
+        try:
+            df.to_excel(out_products, index=False)
+        except (ImportError, ModuleNotFoundError) as exc:
+            exc_text = str(exc)
+            if "openpyxl" in exc_text.lower():
+                message = (
+                    "Не вдалося зберегти Excel-файл: бібліотека openpyxl не встановлена або пошкоджена.\n"
+                    "Встановіть її командою 'pip install openpyxl' і перезапустіть застосунок, або оберіть інший формат експорту."
+                )
+                raise RuntimeError(message) from exc
+            raise
+    elif fmt == CSV_FORMAT_LABEL:
         out_products = base + ".csv"
         if pd is not None:
             pd.DataFrame.from_records(records, columns=columns).to_csv(
@@ -915,10 +980,12 @@ def export_products(records: list, columns: list, fmt: str, folder: str):
                 for record in records:
                     row = [record.get(col, "") for col in columns]
                     writer.writerow(row)
-    else:
+    elif fmt == JSON_FORMAT_LABEL:
         out_products = base + ".json"
         with open(out_products, "w", encoding="utf-8") as f:
             json.dump(records, f, ensure_ascii=False, indent=2)
+    else:
+        raise ValueError(f"Невідомий формат експорту: {fmt}")
 
     return out_products
 
