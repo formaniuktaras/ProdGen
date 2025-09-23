@@ -3,6 +3,12 @@
 ProdGen is a desktop application for managing product categories, brands, and models, and for generating listings based on customizable templates.
 
 ## Manual QA
+### Підготовка до правильної роботи
+
+1. Потрібно щоб на комп'ютері були встановлені бібліотеки jinja2 та pandas, для цього через powerShell або інший термінал виконайте запити:
+  - pip install jinja2
+  - pip install pandas
+
 
 ### Перейменування з дублікатами
 
