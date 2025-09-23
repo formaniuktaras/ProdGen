@@ -1504,6 +1504,14 @@ class App(ctk.CTk):
         self.progress_bar = None
         self.progress_label = None
         self._preview_window = None
+        # Compatibility: some flows expect the filmtype name variable to exist during tab
+        # construction even if the dedicated film type tab is hidden. Older widgets access
+        # the variable through the low-level Tk interpreter (self.tk), so mirror the
+        # attribute there as well.
+        self.filmtype_name_var = tk.StringVar(master=self, value="")
+        tkapp = getattr(self, "tk", None)
+        if tkapp is not None:
+            setattr(tkapp, "filmtype_name_var", self.filmtype_name_var)
 
         self._build_header()
         self._build_tabs()
