@@ -1465,9 +1465,50 @@ class SpecsWindow(ctk.CTkToplevel):
 
 # ============================ GUI: ОСНОВНИЙ ДОДАТОК ============================
 
+class _TkAppCompatProxy:
+    """Proxy that allows attaching arbitrary Python attributes to a tkapp."""
+
+    __slots__ = ("_tkapp", "_extras")
+
+    def __init__(self, tkapp):
+        object.__setattr__(self, "_tkapp", tkapp)
+        object.__setattr__(self, "_extras", {})
+
+    def __getattr__(self, name):
+        extras = object.__getattribute__(self, "_extras")
+        if name in extras:
+            return extras[name]
+        return getattr(object.__getattribute__(self, "_tkapp"), name)
+
+    def __setattr__(self, name, value):
+        if name in {"_tkapp", "_extras"}:
+            object.__setattr__(self, name, value)
+            return
+        extras = object.__getattribute__(self, "_extras")
+        extras[name] = value
+
+    def __delattr__(self, name):
+        if name in {"_tkapp", "_extras"}:
+            raise AttributeError(name)
+        extras = object.__getattribute__(self, "_extras")
+        if name in extras:
+            del extras[name]
+            return
+        delattr(object.__getattribute__(self, "_tkapp"), name)
+
+    def __dir__(self):
+        extras = object.__getattribute__(self, "_extras")
+        base_dir = dir(object.__getattribute__(self, "_tkapp"))
+        return sorted(set(base_dir).union(extras.keys()))
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
+        raw_tkapp = object.__getattribute__(self, "tk")
+        if not isinstance(raw_tkapp, _TkAppCompatProxy):
+            object.__setattr__(self, "tk", _TkAppCompatProxy(raw_tkapp))
+        tkapp = object.__getattribute__(self, "tk")
         self.title(APP_TITLE)
         self.geometry("1100x680")
         self.minsize(980, 640)
@@ -1506,12 +1547,10 @@ class App(ctk.CTk):
         self._preview_window = None
         # Compatibility: some flows expect the filmtype name variable to exist during tab
         # construction even if the dedicated film type tab is hidden. Older widgets access
-        # the variable through the low-level Tk interpreter (self.tk), so mirror the
-        # attribute there as well.
+        # the variable through the low-level Tk interpreter (self.tk), so expose it there
+        # via a proxy that can store Python attributes.
         self.filmtype_name_var = tk.StringVar(master=self, value="")
-        tkapp = getattr(self, "tk", None)
-        if tkapp is not None:
-            setattr(tkapp, "filmtype_name_var", self.filmtype_name_var)
+        tkapp.filmtype_name_var = self.filmtype_name_var
 
         self._build_header()
         self._build_tabs()
