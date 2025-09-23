@@ -11,8 +11,9 @@ from itertools import islice
 APP_TITLE = "Prom Generator"
 from copy import deepcopy
 from datetime import datetime
+from typing import Optional
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from formula_engine import FormulaEngine, FormulaError
 
@@ -135,6 +136,7 @@ TEMPLATES_FILE = "templates.json"
 EXPORT_FIELDS_FILE = "export_fields.json"
 TITLE_TAGS_FILE = "title_tags_templates.json"
 FILM_TYPE_DEFAULT_LABEL = "Універсальний шаблон"
+CATEGORY_SCOPE_DEFAULT_LABEL = "Для всіх категорій"
 
 # ============================ ШАБЛОНИ / НАЛАШТУВАННЯ ============================
 
@@ -246,9 +248,11 @@ def _title_tags_block(title: str, tags: str) -> dict:
 
 def _build_title_tags_defaults(film_type_names, base_title, base_tags):
     base_block = _title_tags_block(base_title, base_tags)
-    data = {"default": base_block.copy()}
-    for name in film_type_names:
-        data[name] = base_block.copy()
+    data = {
+        "default": base_block.copy(),
+        "by_film": {name: base_block.copy() for name in film_type_names},
+        "by_category": {},
+    }
     return data
 
 def load_templates():
@@ -280,6 +284,19 @@ def save_templates(dct):
     with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
         json.dump(dct, f, ensure_ascii=False, indent=2)
 
+def _normalize_title_tags_block(block: dict, fallback: dict) -> dict:
+    if not isinstance(block, dict):
+        block = {}
+    normalized = {}
+    for key in ("title_template", "tags_template"):
+        value = block.get(key)
+        if isinstance(value, str):
+            normalized[key] = value
+        else:
+            normalized[key] = fallback.get(key, "")
+    return normalized
+
+
 def load_title_tags_templates(templates: dict):
     film_type_names = [item.get("name") for item in templates.get("film_types", []) if item.get("name")]
     base_title = templates.get("title_template", DEFAULT_TEMPLATES["title_template"])
@@ -293,52 +310,125 @@ def load_title_tags_templates(templates: dict):
     with open(TITLE_TAGS_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
 
+    if not isinstance(data, dict):
+        save_title_tags_templates(defaults)
+        return defaults
+
     changed = False
 
-    if "default" not in data or not isinstance(data["default"], dict):
-        data["default"] = defaults["default"].copy()
+    legacy_film_blocks = {}
+    for key in list(data.keys()):
+        if key in ("default", "by_film", "by_category"):
+            continue
+        value = data.pop(key)
+        if isinstance(value, dict):
+            legacy_film_blocks[key] = value
+            changed = True
+
+    default_block = _normalize_title_tags_block(data.get("default"), defaults["default"])
+    by_film_raw = data.get("by_film")
+    if not isinstance(by_film_raw, dict):
+        by_film_raw = {}
+        changed = True
+    by_category_raw = data.get("by_category")
+    if not isinstance(by_category_raw, dict):
+        by_category_raw = {}
         changed = True
 
-    for key in ("title_template", "tags_template"):
-        if key not in data["default"]:
-            data["default"][key] = defaults["default"][key]
-            changed = True
+    for name, block in legacy_film_blocks.items():
+        by_film_raw[name] = _normalize_title_tags_block(block, default_block)
+
+    normalized_by_film = {}
+    for name, block in by_film_raw.items():
+        normalized_by_film[name] = _normalize_title_tags_block(block, default_block)
 
     for name in film_type_names:
-        block = data.get(name)
-        if not isinstance(block, dict):
-            data[name] = defaults["default"].copy()
+        if name not in normalized_by_film:
+            normalized_by_film[name] = _normalize_title_tags_block({}, default_block)
+            changed = True
+
+    normalized_by_category = {}
+    for cat_name, cat_block in by_category_raw.items():
+        if not isinstance(cat_block, dict):
             changed = True
             continue
-        for key in ("title_template", "tags_template"):
-            if key not in block:
-                block[key] = data["default"].get(key, defaults["default"][key])
+        cat_default = _normalize_title_tags_block(cat_block.get("default"), default_block)
+        cat_films_raw = cat_block.get("by_film")
+        if not isinstance(cat_films_raw, dict):
+            cat_films_raw = {}
+            changed = True
+        normalized_cat_films = {}
+        for film_name, block in cat_films_raw.items():
+            normalized_cat_films[film_name] = _normalize_title_tags_block(block, cat_default)
+        for film_name in film_type_names:
+            if film_name not in normalized_cat_films:
+                normalized_cat_films[film_name] = _normalize_title_tags_block({}, cat_default)
                 changed = True
+        normalized_by_category[cat_name] = {
+            "default": cat_default,
+            "by_film": normalized_cat_films,
+        }
 
-    if changed:
-        save_title_tags_templates(data)
+    normalized = {
+        "default": default_block,
+        "by_film": normalized_by_film,
+        "by_category": normalized_by_category,
+    }
 
-    return data
+    if normalized != data or changed:
+        save_title_tags_templates(normalized)
+        return normalized
+
+    return normalized
 
 def save_title_tags_templates(dct):
     with open(TITLE_TAGS_FILE, "w", encoding="utf-8") as f:
         json.dump(dct, f, ensure_ascii=False, indent=2)
 
-def resolve_title_tags(title_tags_templates: dict, templates: dict, film_type: str):
+def resolve_title_tags(title_tags_templates: dict, templates: dict, category: Optional[str], film_type: str):
     fallback_title = templates.get("title_template", DEFAULT_TEMPLATES["title_template"])
     fallback_tags = templates.get("tags_template", DEFAULT_TEMPLATES["tags_template"])
+
     default_block = title_tags_templates.get("default", {})
-    film_block = title_tags_templates.get(film_type, {})
-    title_template = (
-        film_block.get("title_template")
-        or default_block.get("title_template")
-        or fallback_title
-    )
-    tags_template = (
-        film_block.get("tags_template")
-        or default_block.get("tags_template")
-        or fallback_tags
-    )
+    by_film = title_tags_templates.get("by_film", {})
+    by_category = title_tags_templates.get("by_category", {})
+
+    if not isinstance(default_block, dict):
+        default_block = {}
+    if not isinstance(by_film, dict):
+        by_film = {}
+    if not isinstance(by_category, dict):
+        by_category = {}
+
+    cat_block = {}
+    if category:
+        cat_block = by_category.get(category, {})
+        if not isinstance(cat_block, dict):
+            cat_block = {}
+    cat_default = cat_block.get("default", {}) if isinstance(cat_block, dict) else {}
+    if not isinstance(cat_default, dict):
+        cat_default = {}
+    cat_by_film = cat_block.get("by_film", {}) if isinstance(cat_block, dict) else {}
+    if not isinstance(cat_by_film, dict):
+        cat_by_film = {}
+    cat_film_block = cat_by_film.get(film_type, {})
+    if not isinstance(cat_film_block, dict):
+        cat_film_block = {}
+
+    film_block = by_film.get(film_type, {})
+    if not isinstance(film_block, dict):
+        film_block = {}
+
+    def resolve_value(key: str, default_value: str) -> str:
+        for block in (cat_film_block, cat_default, film_block, default_block):
+            if isinstance(block, dict):
+                value = block.get(key)
+                if isinstance(value, str):
+                    return value
+        return default_value
+
+    title_template = resolve_value("title_template", fallback_title)
+    tags_template = resolve_value("tags_template", fallback_tags)
     return title_template, tags_template
 
 
@@ -991,23 +1081,29 @@ def generate_export_rows(
         cat_desc_block = descriptions.get(cat, {}) if isinstance(descriptions, dict) else {}
         for f in film_types:
             film_type = f if isinstance(f, str) else str(f)
-            if film_type not in title_tags_cache:
-                title_tpl_str, tags_tpl_str = resolve_title_tags(title_tags_templates, templates, film_type)
+            cache_key = (cat, film_type)
+            if cache_key not in title_tags_cache:
+                title_tpl_str, tags_tpl_str = resolve_title_tags(
+                    title_tags_templates,
+                    templates,
+                    cat,
+                    film_type,
+                )
                 try:
                     title_tpl = Template(title_tpl_str)
                     tags_tpl = Template(tags_tpl_str)
                 except TemplateError as exc:
                     raise ValueError(
-                        f"Помилка в шаблонах заголовку/тегів для типу \"{film_type}\": {exc}"
+                        f"Помилка в шаблонах заголовку/тегів для категорії \"{cat}\" і типу \"{film_type}\": {exc}"
                     ) from exc
-                title_tags_cache[film_type] = (title_tpl, tags_tpl)
-            title_t, tags_t = title_tags_cache[film_type]
+                title_tags_cache[cache_key] = (title_tpl, tags_tpl)
+            title_t, tags_t = title_tags_cache[cache_key]
             try:
                 title_value = title_t.render(film_type=film_type, brand=brand, model=model, category=cat)
                 tags_value = tags_t.render(film_type=film_type, brand=brand, model=model, category=cat)
             except TemplateError as exc:
                 raise ValueError(
-                    f"Не вдалося згенерувати заголовок або теги для типу \"{film_type}\": {exc}"
+                    f"Не вдалося згенерувати заголовок або теги для категорії \"{cat}\" і типу \"{film_type}\": {exc}"
                 ) from exc
 
             desc_key = (cat, film_type)
@@ -1426,8 +1522,11 @@ class App(ctk.CTk):
         self.current_brand_id = None
         self._current_film_type_key = None
         self._current_desc_category = None
-        self._template_scope_display_to_pair = {}
-        self._template_scope_pair_to_display = {}
+        self._current_template_category = None
+        self._template_category_label_to_key = {}
+        self._template_category_key_to_label = {}
+        self._template_film_label_to_key = {}
+        self._template_film_key_to_label = {}
         self._gen_tree = None
         self._gen_tree_states = {}
         self._gen_tree_meta = {}
@@ -1456,6 +1555,7 @@ class App(ctk.CTk):
         self.filmtype_enabled_var = tk.BooleanVar(master=self, value=True)
         tkapp.filmtype_enabled_var = self.filmtype_enabled_var
 
+
         self._build_header()
         self._build_tabs()
 
@@ -1465,6 +1565,180 @@ class App(ctk.CTk):
 
         if DEPENDENCY_WARNINGS:
             self.after(200, self._show_dependency_warnings)
+
+    def _sync_templates_with_catalog(self):
+        categories = [name.strip() for _cid, name in get_categories() if isinstance(name, str) and name.strip()]
+        descriptions = self.templates.setdefault("descriptions", {})
+        changed_templates = False
+        for name in categories:
+            if name not in descriptions:
+                descriptions[name] = {}
+                changed_templates = True
+        if changed_templates:
+            save_templates(self.templates)
+
+        changed_title_tags = False
+        for name in categories:
+            if self._ensure_title_tags_category(name):
+                changed_title_tags = True
+
+        for item in self.templates.get("film_types", []):
+            fname = item.get("name")
+            if isinstance(fname, str) and fname:
+                if self._ensure_title_tags_film(fname):
+                    changed_title_tags = True
+
+        if changed_title_tags:
+            save_title_tags_templates(self.title_tags_templates)
+
+    def _ensure_title_tags_category(self, category_name: str) -> bool:
+        if not category_name:
+            return False
+        by_category = self.title_tags_templates.setdefault("by_category", {})
+        changed = False
+        cat_entry = by_category.get(category_name)
+        if not isinstance(cat_entry, dict):
+            by_category[category_name] = {"default": {}, "by_film": {}}
+            return True
+        if "default" not in cat_entry or not isinstance(cat_entry["default"], dict):
+            cat_entry["default"] = {}
+            changed = True
+        if "by_film" not in cat_entry or not isinstance(cat_entry["by_film"], dict):
+            cat_entry["by_film"] = {}
+            changed = True
+        return changed
+
+    def _ensure_title_tags_film(self, film_name: str) -> bool:
+        if not film_name:
+            return False
+        by_film = self.title_tags_templates.setdefault("by_film", {})
+        block = by_film.get(film_name)
+        if not isinstance(block, dict):
+            by_film[film_name] = {}
+            return True
+        return False
+
+    def _rename_category_templates(self, old_name: str, new_name: str):
+        if not old_name or not new_name or old_name == new_name:
+            return
+        descriptions = self.templates.setdefault("descriptions", {})
+        changed_templates = False
+        old_block = descriptions.pop(old_name, None)
+        if isinstance(old_block, dict):
+            target = descriptions.get(new_name)
+            if isinstance(target, dict):
+                for key, value in old_block.items():
+                    if key not in target:
+                        target[key] = value
+            else:
+                descriptions[new_name] = old_block
+            changed_templates = True
+
+        by_category = self.title_tags_templates.setdefault("by_category", {})
+        changed_title_tags = False
+        old_cat_block = by_category.pop(old_name, None)
+        if isinstance(old_cat_block, dict):
+            target_block = by_category.get(new_name)
+            if isinstance(target_block, dict):
+                if isinstance(old_cat_block.get("default"), dict) and not isinstance(target_block.get("default"), dict):
+                    target_block["default"] = old_cat_block["default"]
+                src_films = old_cat_block.get("by_film")
+                if isinstance(src_films, dict):
+                    dst_films = target_block.setdefault("by_film", {})
+                    for film_name, block in src_films.items():
+                        if film_name not in dst_films:
+                            dst_films[film_name] = block
+            else:
+                by_category[new_name] = old_cat_block
+            changed_title_tags = True
+
+        if changed_templates:
+            save_templates(self.templates)
+        if changed_title_tags or self._ensure_title_tags_category(new_name):
+            save_title_tags_templates(self.title_tags_templates)
+
+    def _delete_category_templates(self, category_name: str):
+        if not category_name:
+            return
+        descriptions = self.templates.get("descriptions", {})
+        changed_templates = False
+        if category_name in descriptions:
+            descriptions.pop(category_name, None)
+            changed_templates = True
+
+        by_category = self.title_tags_templates.get("by_category", {})
+        changed_title_tags = False
+        if isinstance(by_category, dict) and category_name in by_category:
+            by_category.pop(category_name, None)
+            changed_title_tags = True
+
+        if changed_templates:
+            save_templates(self.templates)
+        if changed_title_tags:
+            save_title_tags_templates(self.title_tags_templates)
+
+    def _rename_film_type(self, old_name: str, new_name: str):
+        if not old_name or not new_name or old_name == new_name:
+            return
+        changed_templates = False
+        for desc in self.templates.get("descriptions", {}).values():
+            if isinstance(desc, dict) and old_name in desc:
+                if new_name not in desc:
+                    desc[new_name] = desc.pop(old_name)
+                else:
+                    desc.pop(old_name, None)
+                changed_templates = True
+
+        by_film = self.title_tags_templates.setdefault("by_film", {})
+        changed_title_tags = False
+        if isinstance(by_film, dict) and old_name in by_film:
+            block = by_film.pop(old_name)
+            by_film[new_name] = block
+            changed_title_tags = True
+
+        for cat_block in self.title_tags_templates.setdefault("by_category", {}).values():
+            if not isinstance(cat_block, dict):
+                continue
+            films_map = cat_block.get("by_film")
+            if isinstance(films_map, dict) and old_name in films_map:
+                if new_name not in films_map:
+                    films_map[new_name] = films_map.pop(old_name)
+                else:
+                    films_map.pop(old_name, None)
+                changed_title_tags = True
+
+        if changed_templates:
+            save_templates(self.templates)
+        if changed_title_tags:
+            save_title_tags_templates(self.title_tags_templates)
+
+    def _remove_film_type_templates(self, film_name: str):
+        if not film_name:
+            return
+        changed_templates = False
+        for desc in self.templates.get("descriptions", {}).values():
+            if isinstance(desc, dict) and film_name in desc:
+                desc.pop(film_name, None)
+                changed_templates = True
+
+        by_film = self.title_tags_templates.get("by_film", {})
+        changed_title_tags = False
+        if isinstance(by_film, dict) and film_name in by_film:
+            by_film.pop(film_name, None)
+            changed_title_tags = True
+
+        for cat_block in self.title_tags_templates.get("by_category", {}).values():
+            if not isinstance(cat_block, dict):
+                continue
+            films_map = cat_block.get("by_film")
+            if isinstance(films_map, dict) and film_name in films_map:
+                films_map.pop(film_name, None)
+                changed_title_tags = True
+
+        if changed_templates:
+            save_templates(self.templates)
+        if changed_title_tags:
+            save_title_tags_templates(self.title_tags_templates)
 
     # -------- верхній бар
     def _build_header(self):
@@ -1485,11 +1759,13 @@ class App(ctk.CTk):
 
         self.tab_catalog   = tabs.add("Каталог")
         self.tab_templates = tabs.add("Шаблони")
+        self.tab_filmtypes = tabs.add("Типи плівок")
         self.tab_export    = tabs.add("Експорт")
         self.tab_generate  = tabs.add("Генерація")
 
         self._build_tab_catalog()
         self._build_tab_templates()
+        self._build_tab_filmtypes()
         self._build_tab_export()
         self._build_tab_generate()
 
@@ -1507,18 +1783,86 @@ class App(ctk.CTk):
             items.append((name, name))
         return items
 
-    def _template_scope_items(self):
-        categories = list(self.templates.get("descriptions", {}).keys())
-        film_items = self._film_type_menu_items()
-        if not categories:
-            categories = [""]
-        items = []
-        for cat in categories:
-            display_cat = cat if cat else "—"
-            for film_label, film_key in film_items:
-                label = f"{display_cat} — {film_label}"
-                items.append((label, (cat, film_key)))
+    def _template_category_items(self):
+        names = set()
+        for _cid, name in get_categories():
+            if isinstance(name, str):
+                stripped = name.strip()
+                if stripped:
+                    names.add(stripped)
+        for name in self.templates.get("descriptions", {}).keys():
+            if isinstance(name, str):
+                stripped = name.strip()
+                if stripped:
+                    names.add(stripped)
+        items = [(CATEGORY_SCOPE_DEFAULT_LABEL, None)]
+        for name in sorted(names):
+            items.append((name, name))
         return items
+
+    def _refresh_template_selectors(self):
+        if not hasattr(self, "template_category_menu") or not hasattr(self, "template_film_menu"):
+            return
+
+        category_items = self._template_category_items()
+        if not category_items:
+            category_items = [(CATEGORY_SCOPE_DEFAULT_LABEL, None)]
+        film_items = self._film_type_menu_items()
+        if not film_items:
+            film_items = [(FILM_TYPE_DEFAULT_LABEL, "default")]
+
+        self._template_category_label_to_key = {label: key for label, key in category_items}
+        self._template_category_key_to_label = {key: label for label, key in category_items}
+        self._template_film_label_to_key = {label: key for label, key in film_items}
+        self._template_film_key_to_label = {key: label for label, key in film_items}
+
+        self.template_category_menu.configure(values=[label for label, _ in category_items])
+        self.template_film_menu.configure(values=[label for label, _ in film_items])
+
+        current_cat = self._current_template_category
+        if current_cat not in self._template_category_key_to_label:
+            current_cat = category_items[0][1]
+            if current_cat is None and len(category_items) > 1:
+                current_cat = category_items[1][1]
+        self._current_template_category = current_cat
+        category_label = self._template_category_key_to_label.get(current_cat, CATEGORY_SCOPE_DEFAULT_LABEL)
+        self.template_category_var.set(category_label)
+        self.template_category_menu.set(category_label)
+
+        current_film = self._selected_film_type_key()
+        if current_film not in self._template_film_key_to_label:
+            current_film = film_items[0][1]
+        self._current_film_type_key = current_film
+        film_label = self._template_film_key_to_label.get(current_film, FILM_TYPE_DEFAULT_LABEL)
+        self.template_film_var.set(film_label)
+        self.template_film_menu.set(film_label)
+
+        if current_cat and isinstance(current_cat, str):
+            self._current_desc_category = current_cat
+            if hasattr(self, "desc_cat_var"):
+                self.desc_cat_var.set(current_cat)
+
+        self._on_template_scope_change()
+
+    def _set_title_tags_block(self, category_key: Optional[str], film_key: str, title_value: str, tags_value: str):
+        block = {
+            "title_template": title_value,
+            "tags_template": tags_value,
+        }
+        if not isinstance(self.title_tags_templates.get("default"), dict):
+            self.title_tags_templates["default"] = block.copy()
+        if category_key:
+            self._ensure_title_tags_category(category_key)
+            cat_entry = self.title_tags_templates.setdefault("by_category", {}).setdefault(category_key, {"default": {}, "by_film": {}})
+            if film_key == "default":
+                cat_entry["default"] = block
+            else:
+                cat_entry.setdefault("by_film", {})[film_key] = block
+        else:
+            if film_key == "default":
+                self.title_tags_templates["default"] = block
+            else:
+                self.title_tags_templates.setdefault("by_film", {})[film_key] = block
 
     def _selected_film_type_key(self) -> str:
         key = getattr(self, "_current_film_type_key", None)
@@ -1748,6 +2092,8 @@ class App(ctk.CTk):
         self._refresh_brands(None)
         self._refresh_models(None)
         self._reload_gen_tree()
+        self._sync_templates_with_catalog()
+        self._refresh_template_selectors()
 
     def _refresh_brands(self, category_id):
         self.brand_tree.delete(*self.brand_tree.get_children())
@@ -1790,6 +2136,12 @@ class App(ctk.CTk):
         if not self.current_category_id: return show_error("Виберіть категорію.")
         name = self.cat_entry.get().strip()
         if not name: return show_error("Введіть нову назву категорії.")
+        sel = self.cat_tree.selection()
+        old_name = None
+        if sel:
+            old_val = self.cat_tree.item(sel[0], "values")
+            if old_val:
+                old_name = (old_val[0] or "").strip()
         cat_id = self.current_category_id
         result = rename_category(cat_id, name)
         if result is not True:
@@ -1797,6 +2149,13 @@ class App(ctk.CTk):
                 show_error("Категорія з такою назвою вже існує.")
             else:
                 show_error("Не вдалося перейменувати категорію.")
+        else:
+            if old_name:
+                self._rename_category_templates(old_name, name)
+            if self._current_template_category == old_name:
+                self._current_template_category = name
+            if self._current_desc_category == old_name:
+                self._current_desc_category = name
         self._refresh_categories()
         if cat_id:
             self.after(10, lambda: self._restore_tree_selection("cat", f"cat_{cat_id}"))
@@ -1813,8 +2172,26 @@ class App(ctk.CTk):
         if not messagebox.askyesno("Підтвердження", prompt):
             return
         ids = [int(iid.split("_")[1]) for iid in selection]
+        id_to_name = {}
+        for iid in selection:
+            parts = iid.split("_")
+            if len(parts) == 2:
+                try:
+                    cid = int(parts[1])
+                except ValueError:
+                    continue
+                values = self.cat_tree.item(iid, "values")
+                if values:
+                    id_to_name[cid] = (values[0] or "").strip()
         for cat_id in ids:
             delete_category(cat_id)
+            cat_name = id_to_name.get(cat_id)
+            if cat_name:
+                self._delete_category_templates(cat_name)
+                if self._current_template_category == cat_name:
+                    self._current_template_category = None
+                if self._current_desc_category == cat_name:
+                    self._current_desc_category = None
         self._refresh_categories()
 
     def _brand_add(self):
@@ -1920,27 +2297,38 @@ class App(ctk.CTk):
         wrap.pack(fill="both", expand=True, padx=10, pady=10)
 
         selector = ctk.CTkFrame(wrap)
-        selector.pack(fill="x", padx=10, pady=(6,2))
-        ctk.CTkLabel(selector, text="Категорія та тип плівки:").pack(side="left", padx=(0,6))
-        self.template_scope_var = tk.StringVar(value="")
-        self.template_scope_menu = ctk.CTkOptionMenu(
+        selector.pack(fill="x", padx=10, pady=(6, 2))
+        ctk.CTkLabel(selector, text="Категорія:").pack(side="left", padx=(0, 6))
+        self.template_category_var = tk.StringVar(value="")
+        self.template_category_menu = ctk.CTkOptionMenu(
             selector,
             values=["—"],
-            variable=self.template_scope_var,
-            width=320,
-            command=self._on_template_scope_change
+            variable=self.template_category_var,
+            width=220,
+            command=lambda _value: self._on_template_scope_change(),
         )
-        self.template_scope_menu.pack(side="left")
+        self.template_category_menu.pack(side="left", padx=(0, 10))
+
+        ctk.CTkLabel(selector, text="Тип плівки:").pack(side="left", padx=(0, 6))
+        self.template_film_var = tk.StringVar(value="")
+        self.template_film_menu = ctk.CTkOptionMenu(
+            selector,
+            values=["—"],
+            variable=self.template_film_var,
+            width=220,
+            command=lambda _value: self._on_template_scope_change(),
+        )
+        self.template_film_menu.pack(side="left")
 
         # Ліва колонка: Заголовок і Теги
         left = ctk.CTkFrame(wrap)
-        left.pack(side="left", fill="both", expand=True, padx=(0,10), pady=5)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 10), pady=5)
 
-        ctk.CTkLabel(left, text="Шаблон заголовка ({{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10,0))
+        ctk.CTkLabel(left, text="Шаблон заголовка ({{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10, 0))
         self.title_box = ctk.CTkTextbox(left, height=80)
         self.title_box.pack(fill="x", padx=10, pady=5)
 
-        ctk.CTkLabel(left, text="Шаблон тегів ({{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10,0))
+        ctk.CTkLabel(left, text="Шаблон тегів ({{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10, 0))
         self.tags_box = ctk.CTkTextbox(left, height=110)
         self.tags_box.pack(fill="x", padx=10, pady=5)
 
@@ -1948,36 +2336,31 @@ class App(ctk.CTk):
 
         # Права колонка: Опис для Категорії + Типу плівки
         right = ctk.CTkFrame(wrap)
-        right.pack(side="left", fill="both", expand=True, padx=(10,0), pady=5)
+        right.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=5)
 
-        categories = list(self.templates.get("descriptions", {}).keys())
-        initial_category = categories[0] if categories else ""
-        self.desc_cat_var = tk.StringVar(value=initial_category)
-        if self._current_desc_category is None:
-            self._current_desc_category = initial_category
-
-        ctk.CTkLabel(right, text="Шаблон опису (доступні {{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10,0))
+        ctk.CTkLabel(right, text="Шаблон опису (доступні {{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10, 0))
         self.desc_box = ctk.CTkTextbox(right)
         self.desc_box.pack(fill="both", expand=True, padx=10, pady=5)
 
-        btn_row = ctk.CTkFrame(right); btn_row.pack(fill="x", padx=10, pady=6)
-        ctk.CTkButton(btn_row, text="Зберегти опис", command=self._save_desc_template).pack(side="right")
+        btn_row = ctk.CTkFrame(right)
+        btn_row.pack(fill="x", padx=10, pady=6)
+        self.desc_save_button = ctk.CTkButton(btn_row, text="Зберегти опис", command=self._save_desc_template)
+        self.desc_save_button.pack(side="right")
 
-        self._refresh_template_scope_menu()
+        self.desc_cat_var = tk.StringVar(value="")
+
+        self._refresh_template_selectors()
 
     def _save_title_tags(self, show_message: bool = True):
         film = self._selected_film_type_key()
+        category_key = self._current_template_category
         title_value = self.title_box.get("1.0", "end").strip()
         tags_value = self.tags_box.get("1.0", "end").strip()
 
-        if film not in self.title_tags_templates:
-            self.title_tags_templates[film] = {}
-
-        self.title_tags_templates[film]["title_template"] = title_value
-        self.title_tags_templates[film]["tags_template"] = tags_value
+        self._set_title_tags_block(category_key, film, title_value, tags_value)
         save_title_tags_templates(self.title_tags_templates)
 
-        if film == "default":
+        if category_key is None and film == "default":
             self.templates["title_template"] = title_value
             self.templates["tags_template"] = tags_value
             save_templates(self.templates)
@@ -1988,74 +2371,52 @@ class App(ctk.CTk):
     def _load_title_tags_template(self):
         if not hasattr(self, "title_box") or not hasattr(self, "tags_box"):
             return
+        category = self._current_template_category
         film = self._selected_film_type_key()
-        title_template, tags_template = resolve_title_tags(self.title_tags_templates, self.templates, film)
+        title_template, tags_template = resolve_title_tags(self.title_tags_templates, self.templates, category, film)
         self.title_box.delete("1.0", "end")
         self.title_box.insert("1.0", title_template)
         self.tags_box.delete("1.0", "end")
         self.tags_box.insert("1.0", tags_template)
 
-    def _refresh_template_scope_menu(self):
-        if not hasattr(self, "template_scope_menu"):
+    def _on_template_scope_change(self, _selected_label=None):
+        if not hasattr(self, "template_category_var") or not hasattr(self, "template_film_var"):
             return
-        items = self._template_scope_items()
-        if not items:
-            return
-        display_values = [label for label, _ in items]
-        self._template_scope_display_to_pair = {label: pair for label, pair in items}
-        self._template_scope_pair_to_display = {pair: label for label, pair in items}
-        self.template_scope_menu.configure(values=display_values)
-
-        current_cat = getattr(self, "_current_desc_category", None)
-        current_film = self._selected_film_type_key()
-        if current_cat is None:
-            current_cat = items[0][1][0]
-        pair = (current_cat, current_film)
-        if pair not in self._template_scope_pair_to_display:
-            pair = items[0][1]
-            current_cat, current_film = pair
-
-        self._current_desc_category = current_cat
-        if hasattr(self, "desc_cat_var"):
-            self.desc_cat_var.set(current_cat or "")
-        self._current_film_type_key = current_film
-        current_label = self._template_scope_pair_to_display[pair]
-        self.template_scope_var.set(current_label)
-        self.template_scope_menu.set(current_label)
-        self._on_template_scope_change(current_label)
-
-    def _on_template_scope_change(self, selected_label=None):
-        if not hasattr(self, "template_scope_var"):
-            return
-        if selected_label is None:
-            selected_label = self.template_scope_var.get()
-        pair = self._template_scope_display_to_pair.get(selected_label)
-        if pair is None and self._template_scope_display_to_pair:
-            pair = next(iter(self._template_scope_display_to_pair.values()))
-        if pair is None:
-            return
-        cat, film = pair
-        if cat is None:
-            cat = ""
-        self._current_desc_category = cat
-        if hasattr(self, "desc_cat_var"):
-            self.desc_cat_var.set(cat)
-        self._current_film_type_key = film or "default"
+        category_label = self.template_category_var.get()
+        film_label = self.template_film_var.get()
+        category_key = self._template_category_label_to_key.get(category_label)
+        film_key = self._template_film_label_to_key.get(film_label, "default")
+        if not film_key:
+            film_key = "default"
+        self._current_template_category = category_key
+        self._current_film_type_key = film_key
+        if category_key and hasattr(self, "desc_cat_var"):
+            self._current_desc_category = category_key
+            self.desc_cat_var.set(category_key)
         self._load_title_tags_template()
         self._load_desc_template()
 
     def _load_desc_template(self):
-        if not hasattr(self, "desc_box") or not hasattr(self, "desc_cat_var"):
+        if not hasattr(self, "desc_box"):
             return
-        cat = self.desc_cat_var.get()
-        if not cat:
-            categories = list(self.templates.get("descriptions", {}).keys())
-            if categories:
-                cat = categories[0]
-                self.desc_cat_var.set(cat)
-        self._current_desc_category = cat
+        category = self._current_template_category
         film = self._selected_film_type_key()
-        descs = self.templates["descriptions"].get(cat, {})
+        if not category:
+            self.desc_box.configure(state="normal")
+            self.desc_box.delete("1.0", "end")
+            self.desc_box.insert("1.0", "Оберіть категорію, щоб редагувати опис.")
+            self.desc_box.configure(state="disabled")
+            if hasattr(self, "desc_save_button"):
+                self.desc_save_button.configure(state="disabled")
+            return
+
+        if hasattr(self, "desc_save_button"):
+            self.desc_save_button.configure(state="normal")
+        self.desc_box.configure(state="normal")
+        if hasattr(self, "desc_cat_var"):
+            self.desc_cat_var.set(category)
+        self._current_desc_category = category
+        descs = self.templates.get("descriptions", {}).get(category, {})
         if film == "default":
             txt = descs.get("default", "")
         else:
@@ -2068,12 +2429,201 @@ class App(ctk.CTk):
         self.desc_box.insert("1.0", txt)
 
     def _save_desc_template(self):
-        cat = self.desc_cat_var.get()
+        category = self._current_template_category or self.desc_cat_var.get()
+        if not category:
+            return show_error("Виберіть категорію для збереження опису.")
         film = self._selected_film_type_key()
         txt = self.desc_box.get("1.0", "end").strip()
-        self.templates["descriptions"].setdefault(cat, {})[film] = txt
+        self.templates.setdefault("descriptions", {}).setdefault(category, {})[film] = txt
         save_templates(self.templates)
         show_info("Шаблон опису збережено.")
+
+    # -------- Типи плівок
+    def _build_tab_filmtypes(self):
+        wrap = ctk.CTkFrame(self.tab_filmtypes)
+        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+        wrap.grid_columnconfigure(1, weight=1)
+        wrap.grid_rowconfigure(0, weight=1)
+
+        list_frame = ctk.CTkFrame(wrap)
+        list_frame.grid(row=0, column=0, sticky="ns", padx=(0, 10))
+        list_frame.grid_rowconfigure(0, weight=1)
+        list_frame.grid_columnconfigure(0, weight=1)
+
+        self.filmtype_tree = ttk.Treeview(
+            list_frame,
+            columns=("name", "enabled"),
+            show="headings",
+            selectmode="browse",
+            height=14,
+        )
+        self.filmtype_tree.heading("name", text="Назва")
+        self.filmtype_tree.heading("enabled", text="Увімкнено")
+        self.filmtype_tree.column("name", width=220, anchor="w")
+        self.filmtype_tree.column("enabled", width=90, anchor="center")
+        self.filmtype_tree.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.filmtype_tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        self.filmtype_tree.configure(yscrollcommand=y_scroll.set)
+        self.filmtype_tree.bind("<<TreeviewSelect>>", self._on_filmtype_select)
+
+        btn_frame = ctk.CTkFrame(list_frame)
+        btn_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ctk.CTkButton(btn_frame, text="Додати", command=self._filmtype_add).pack(side="left", padx=4)
+        ctk.CTkButton(btn_frame, text="Видалити", command=self._filmtype_delete).pack(side="left", padx=4)
+
+        detail = ctk.CTkFrame(wrap)
+        detail.grid(row=0, column=1, sticky="nsew")
+        detail.grid_rowconfigure(3, weight=1)
+
+        ctk.CTkLabel(detail, text="Назва").pack(anchor="w", padx=10, pady=(10, 0))
+        self.filmtype_name_entry = ctk.CTkEntry(detail, textvariable=self.filmtype_name_var)
+        self.filmtype_name_entry.pack(fill="x", padx=10, pady=(0, 8))
+
+        self.filmtype_enabled_check = ctk.CTkCheckBox(
+            detail,
+            text="Увімкнено за замовчуванням",
+            variable=self.filmtype_enabled_var,
+        )
+        self.filmtype_enabled_check.pack(anchor="w", padx=10, pady=(0, 8))
+
+        ctk.CTkButton(detail, text="Застосувати", command=self._filmtype_apply).pack(anchor="e", padx=10, pady=10)
+
+        self._refresh_filmtype_tree(select_index=0 if self.templates.get("film_types") else None)
+
+    def _refresh_filmtype_tree(self, select_index=None):
+        tree = getattr(self, "filmtype_tree", None)
+        if tree is None:
+            return
+        tree.delete(*tree.get_children())
+        film_types = self.templates.get("film_types", [])
+        for idx, item in enumerate(film_types):
+            name = (item.get("name") or "").strip()
+            enabled = "Так" if item.get("enabled", True) else "Ні"
+            tree.insert("", "end", iid=f"ft_{idx}", values=(name, enabled))
+        if select_index is not None and 0 <= select_index < len(film_types):
+            iid = f"ft_{select_index}"
+            if tree.exists(iid):
+                tree.selection_set(iid)
+                tree.focus(iid)
+                tree.see(iid)
+                self._on_filmtype_select()
+        elif not film_types:
+            self._current_filmtype_index = None
+            self.filmtype_name_var.set("")
+            self.filmtype_enabled_var.set(True)
+
+    def _on_filmtype_select(self, _evt=None):
+        tree = getattr(self, "filmtype_tree", None)
+        if tree is None:
+            return
+        sel = tree.selection()
+        if not sel:
+            self._current_filmtype_index = None
+            self.filmtype_name_var.set("")
+            self.filmtype_enabled_var.set(True)
+            return
+        iid = sel[0]
+        parts = iid.split("_")
+        if len(parts) != 2:
+            return
+        try:
+            idx = int(parts[1])
+        except ValueError:
+            return
+        film_types = self.templates.get("film_types", [])
+        if idx < 0 or idx >= len(film_types):
+            return
+        self._current_filmtype_index = idx
+        item = film_types[idx]
+        self.filmtype_name_var.set(item.get("name", ""))
+        self.filmtype_enabled_var.set(bool(item.get("enabled", True)))
+
+    def _filmtype_add(self):
+        new_name = simpledialog.askstring("Новий тип плівки", "Введіть назву типу плівки:", parent=self)
+        if new_name is None:
+            return
+        new_name = new_name.strip()
+        if not new_name:
+            return show_error("Введіть назву типу плівки.")
+        existing = {((item.get("name") or "").strip().lower()) for item in self.templates.get("film_types", [])}
+        if new_name.lower() in existing:
+            return show_error("Тип плівки з такою назвою вже існує.")
+        self.templates.setdefault("film_types", []).append({"name": new_name, "enabled": True})
+        save_templates(self.templates)
+        if self._ensure_title_tags_film(new_name):
+            save_title_tags_templates(self.title_tags_templates)
+        self._refresh_filmtype_tree(select_index=len(self.templates.get("film_types", [])) - 1)
+        self._refresh_filmtype_checkboxes()
+        self._refresh_template_selectors()
+
+    def _filmtype_delete(self):
+        tree = getattr(self, "filmtype_tree", None)
+        if tree is None:
+            return
+        selection = list(tree.selection())
+        if not selection:
+            return show_error("Виберіть тип плівки.")
+        if not messagebox.askyesno("Підтвердження", "Видалити вибраний тип плівки?"):
+            return
+        indices = []
+        for iid in selection:
+            parts = iid.split("_")
+            if len(parts) != 2:
+                continue
+            try:
+                idx = int(parts[1])
+            except ValueError:
+                continue
+            indices.append(idx)
+        indices = sorted(set(indices), reverse=True)
+        removed_names = []
+        for idx in indices:
+            film_types = self.templates.get("film_types", [])
+            if 0 <= idx < len(film_types):
+                removed = film_types.pop(idx)
+                name = (removed.get("name") or "").strip()
+                if name:
+                    removed_names.append(name)
+        if removed_names:
+            save_templates(self.templates)
+            for name in removed_names:
+                self._remove_film_type_templates(name)
+                if self._current_film_type_key == name:
+                    self._current_film_type_key = "default"
+        self._current_filmtype_index = None
+        self.filmtype_name_var.set("")
+        self.filmtype_enabled_var.set(True)
+        self._refresh_filmtype_tree(select_index=None)
+        self._refresh_filmtype_checkboxes()
+        self._refresh_template_selectors()
+
+    def _filmtype_apply(self):
+        idx = self._current_filmtype_index
+        film_types = self.templates.get("film_types", [])
+        if idx is None or idx < 0 or idx >= len(film_types):
+            return show_error("Виберіть тип плівки.")
+        new_name = self.filmtype_name_var.get().strip()
+        if not new_name:
+            return show_error("Введіть назву типу плівки.")
+        for pos, item in enumerate(film_types):
+            if pos != idx and (item.get("name") or "").strip().lower() == new_name.lower():
+                return show_error("Тип плівки з такою назвою вже існує.")
+        old_name = film_types[idx].get("name", "")
+        film_types[idx]["name"] = new_name
+        film_types[idx]["enabled"] = bool(self.filmtype_enabled_var.get())
+        save_templates(self.templates)
+        if new_name != old_name:
+            self._rename_film_type(old_name, new_name)
+            if self._current_film_type_key == old_name:
+                self._current_film_type_key = new_name
+        self._ensure_title_tags_film(new_name)
+        save_title_tags_templates(self.title_tags_templates)
+        self._refresh_filmtype_tree(select_index=idx)
+        self._refresh_filmtype_checkboxes()
+        self._refresh_template_selectors()
+        show_info("Тип плівки оновлено.")
 
     # -------- Експортні поля
     def _build_tab_export(self):
@@ -2755,7 +3305,7 @@ class App(ctk.CTk):
             var = tk.BooleanVar(value=bool(item.get("enabled", True)))
             ctk.CTkCheckBox(self.filmtype_frame, text=item["name"], variable=var).pack(side="left", padx=6, pady=2)
             self.ft_vars.append((item["name"], var))
-        self._refresh_template_scope_menu()
+        self._refresh_template_selectors()
 
     def _choose_folder(self):
         folder = filedialog.askdirectory(title="Виберіть папку для файлів")
