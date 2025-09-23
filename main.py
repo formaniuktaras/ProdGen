@@ -1552,6 +1552,10 @@ class App(ctk.CTk):
         self.filmtype_name_var = tk.StringVar(master=self, value="")
         tkapp.filmtype_name_var = self.filmtype_name_var
 
+        self.filmtype_enabled_var = tk.BooleanVar(master=self, value=True)
+        tkapp.filmtype_enabled_var = self.filmtype_enabled_var
+
+
         self._build_header()
         self._build_tabs()
 
