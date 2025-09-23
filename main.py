@@ -6,6 +6,7 @@ import re
 import sqlite3
 import sys
 import time
+from itertools import islice
 
 APP_TITLE = "Prom Generator"
 from copy import deepcopy
@@ -1049,7 +1050,7 @@ def generate_export_rows(
                 "now": now_value,
             }
 
-            record = {}
+            row_values = []
             formula_context = None
             for field in enabled_fields:
                 field_name = field["field"]
@@ -1086,13 +1087,40 @@ def generate_export_rows(
                     value = ""
                 elif not isinstance(value, str):
                     value = str(value)
-                record[field_name] = value
-            rows.append(record)
+                row_values.append(value)
+            rows.append(row_values)
             progress_count += 1
             if progress_callback is not None:
                 progress_callback(progress_count, total_steps)
 
     return rows, column_order
+
+
+def _row_to_values(record, columns):
+    if isinstance(record, dict):
+        return [record.get(name, "") for name in columns]
+    if isinstance(record, (list, tuple)):
+        values = list(record)
+        if len(values) < len(columns):
+            values.extend([""] * (len(columns) - len(values)))
+        elif len(values) > len(columns):
+            values = values[: len(columns)]
+        return values
+    return ["" for _ in columns]
+
+
+def _make_unique_column_keys(columns):
+    counts = {}
+    unique_keys = []
+    for name in columns:
+        count = counts.get(name, 0) + 1
+        counts[name] = count
+        if count == 1:
+            unique_keys.append(name)
+        else:
+            unique_keys.append(f"{name}__{count}")
+    return unique_keys
+
 
 def export_products(records: list, columns: list, fmt: str, folder: str):
     ensure_folder(folder)
@@ -1138,12 +1166,17 @@ def export_products(records: list, columns: list, fmt: str, folder: str):
                 if columns:
                     writer.writerow(columns)
                 for record in records:
-                    row = [record.get(col, "") for col in columns]
+                    row = _row_to_values(record, columns)
                     writer.writerow(row)
     elif fmt == JSON_FORMAT_LABEL:
         out_products = base + ".json"
+        json_records = []
+        json_columns = _make_unique_column_keys(columns)
+        for record in records:
+            values = _row_to_values(record, columns)
+            json_records.append({key: value for key, value in zip(json_columns, values)})
         with open(out_products, "w", encoding="utf-8") as f:
-            json.dump(records, f, ensure_ascii=False, indent=2)
+            json.dump(json_records, f, ensure_ascii=False, indent=2)
     else:
         raise ValueError(f"Невідомий формат експорту: {fmt}")
 
@@ -1336,9 +1369,50 @@ class SpecsWindow(ctk.CTkToplevel):
 
 # ============================ GUI: ОСНОВНИЙ ДОДАТОК ============================
 
+class _TkAppCompatProxy:
+    """Proxy that allows attaching arbitrary Python attributes to a tkapp."""
+
+    __slots__ = ("_tkapp", "_extras")
+
+    def __init__(self, tkapp):
+        object.__setattr__(self, "_tkapp", tkapp)
+        object.__setattr__(self, "_extras", {})
+
+    def __getattr__(self, name):
+        extras = object.__getattribute__(self, "_extras")
+        if name in extras:
+            return extras[name]
+        return getattr(object.__getattribute__(self, "_tkapp"), name)
+
+    def __setattr__(self, name, value):
+        if name in {"_tkapp", "_extras"}:
+            object.__setattr__(self, name, value)
+            return
+        extras = object.__getattribute__(self, "_extras")
+        extras[name] = value
+
+    def __delattr__(self, name):
+        if name in {"_tkapp", "_extras"}:
+            raise AttributeError(name)
+        extras = object.__getattribute__(self, "_extras")
+        if name in extras:
+            del extras[name]
+            return
+        delattr(object.__getattribute__(self, "_tkapp"), name)
+
+    def __dir__(self):
+        extras = object.__getattribute__(self, "_extras")
+        base_dir = dir(object.__getattribute__(self, "_tkapp"))
+        return sorted(set(base_dir).union(extras.keys()))
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
+        raw_tkapp = object.__getattribute__(self, "tk")
+        if not isinstance(raw_tkapp, _TkAppCompatProxy):
+            object.__setattr__(self, "tk", _TkAppCompatProxy(raw_tkapp))
+        tkapp = object.__getattribute__(self, "tk")
         self.title(APP_TITLE)
         self.geometry("1100x680")
         self.minsize(980, 640)
@@ -1371,6 +1445,13 @@ class App(ctk.CTk):
         self._export_tree_updating = False
         self.progress_bar = None
         self.progress_label = None
+        self._preview_window = None
+        # Compatibility: some flows expect the filmtype name variable to exist during tab
+        # construction even if the dedicated film type tab is hidden. Older widgets access
+        # the variable through the low-level Tk interpreter (self.tk), so expose it there
+        # via a proxy that can store Python attributes.
+        self.filmtype_name_var = tk.StringVar(master=self, value="")
+        tkapp.filmtype_name_var = self.filmtype_name_var
 
         self._build_header()
         self._build_tabs()
@@ -2405,6 +2486,12 @@ class App(ctk.CTk):
 
         action_row = ctk.CTkFrame(right)
         action_row.pack(fill="x", padx=10, pady=(6, 0))
+        ctk.CTkButton(
+            action_row,
+            text="Попередній перегляд",
+            command=self._preview_generation,
+            height=36,
+        ).pack(side="right", padx=6)
         ctk.CTkButton(action_row, text="Згенерувати", command=self._generate, height=36).pack(side="right", padx=6)
 
         progress_frame = ctk.CTkFrame(right)
@@ -2670,6 +2757,93 @@ class App(ctk.CTk):
     def _choose_folder(self):
         folder = filedialog.askdirectory(title="Виберіть папку для файлів")
         if folder: self.out_folder_var.set(folder)
+
+    def _preview_generation(self):
+        # оновити шаблони/поля перед переглядом
+        self._save_title_tags(show_message=False)
+        self._export_apply_detail(save_to_file=False)
+
+        selected_types = [name for name, var in self.ft_vars if var.get()]
+        if not selected_types:
+            return show_error("Оберіть хоча б один тип плівки.")
+
+        for name, var in self.ft_vars:
+            for item in self.templates["film_types"]:
+                if item["name"] == name:
+                    item["enabled"] = bool(var.get())
+                    break
+        save_templates(self.templates)
+
+        selected_models = sorted(self._collect_checked_model_ids())
+
+        try:
+            if selected_models:
+                records, columns = generate_export_rows(
+                    selected_types,
+                    self.templates,
+                    self.title_tags_templates,
+                    self.export_fields,
+                    model_ids=selected_models,
+                )
+            else:
+                records, columns = generate_export_rows(
+                    selected_types,
+                    self.templates,
+                    self.title_tags_templates,
+                    self.export_fields,
+                )
+        except ValueError as err:
+            return show_error(str(err))
+
+        if not records:
+            return show_error("Немає даних для генерації (перевірте моделі).")
+
+        preview_limit = 20
+        preview_records = list(islice(records, preview_limit))
+
+        if getattr(self, "_preview_window", None) is not None:
+            try:
+                if self._preview_window.winfo_exists():
+                    self._preview_window.destroy()
+            except Exception:
+                pass
+
+        preview_window = ctk.CTkToplevel(self)
+        preview_window.title("Попередній перегляд генерації")
+        preview_window.geometry("960x480")
+        self._preview_window = preview_window
+
+        info_text = f"Показано перші {len(preview_records)} з {len(records)} рядків."
+        ctk.CTkLabel(preview_window, text=info_text, anchor="w").pack(fill="x", padx=14, pady=(12, 4))
+
+        table_frame = ctk.CTkFrame(preview_window)
+        table_frame.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        table_frame.grid_columnconfigure(0, weight=1)
+        table_frame.grid_rowconfigure(0, weight=1)
+
+        column_ids = [f"preview_col_{idx}" for idx in range(len(columns))]
+        tree = ttk.Treeview(table_frame, columns=column_ids, show="headings")
+        tree.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        for col_id, header in zip(column_ids, columns):
+            tree.heading(col_id, text=header)
+            tree.column(col_id, anchor="w", stretch=True, width=160)
+
+        for record in preview_records:
+            values = _row_to_values(record, columns)
+            tree.insert("", "end", values=values)
+
+        if len(records) > preview_limit:
+            note = f"(Доступно більше рядків: всього {len(records)}.)"
+            ctk.CTkLabel(preview_window, text=note, anchor="w").pack(fill="x", padx=14, pady=(0, 10))
+
+        ctk.CTkButton(preview_window, text="Закрити", command=preview_window.destroy).pack(pady=(0, 12))
 
     def _generate(self):
         self._progress_reset("Підготовка...")
