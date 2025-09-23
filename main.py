@@ -6,6 +6,7 @@ import re
 import sqlite3
 import sys
 import time
+from itertools import islice
 
 APP_TITLE = "Prom Generator"
 from copy import deepcopy
@@ -2960,6 +2961,12 @@ class App(ctk.CTk):
 
         action_row = ctk.CTkFrame(right)
         action_row.pack(fill="x", padx=10, pady=(6, 0))
+        ctk.CTkButton(
+            action_row,
+            text="Попередній перегляд",
+            command=self._preview_generation,
+            height=36,
+        ).pack(side="right", padx=6)
         ctk.CTkButton(action_row, text="Згенерувати", command=self._generate, height=36).pack(side="right", padx=6)
 
         progress_frame = ctk.CTkFrame(right)
@@ -3225,6 +3232,92 @@ class App(ctk.CTk):
     def _choose_folder(self):
         folder = filedialog.askdirectory(title="Виберіть папку для файлів")
         if folder: self.out_folder_var.set(folder)
+
+    def _preview_generation(self):
+        # оновити шаблони/поля перед переглядом
+        self._save_title_tags(show_message=False)
+        self._export_apply_detail(save_to_file=False)
+
+        selected_types = [name for name, var in self.ft_vars if var.get()]
+        if not selected_types:
+            return show_error("Оберіть хоча б один тип плівки.")
+
+        for name, var in self.ft_vars:
+            for item in self.templates["film_types"]:
+                if item["name"] == name:
+                    item["enabled"] = bool(var.get())
+                    break
+        save_templates(self.templates)
+
+        selected_models = sorted(self._collect_checked_model_ids())
+
+        try:
+            if selected_models:
+                records, columns = generate_export_rows(
+                    selected_types,
+                    self.templates,
+                    self.title_tags_templates,
+                    self.export_fields,
+                    model_ids=selected_models,
+                )
+            else:
+                records, columns = generate_export_rows(
+                    selected_types,
+                    self.templates,
+                    self.title_tags_templates,
+                    self.export_fields,
+                )
+        except ValueError as err:
+            return show_error(str(err))
+
+        if not records:
+            return show_error("Немає даних для генерації (перевірте моделі).")
+
+        preview_limit = 20
+        preview_records = list(islice(records, preview_limit))
+
+        if getattr(self, "_preview_window", None) is not None:
+            try:
+                if self._preview_window.winfo_exists():
+                    self._preview_window.destroy()
+            except Exception:
+                pass
+
+        preview_window = ctk.CTkToplevel(self)
+        preview_window.title("Попередній перегляд генерації")
+        preview_window.geometry("960x480")
+        self._preview_window = preview_window
+
+        info_text = f"Показано перші {len(preview_records)} з {len(records)} рядків."
+        ctk.CTkLabel(preview_window, text=info_text, anchor="w").pack(fill="x", padx=14, pady=(12, 4))
+
+        table_frame = ctk.CTkFrame(preview_window)
+        table_frame.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        table_frame.grid_columnconfigure(0, weight=1)
+        table_frame.grid_rowconfigure(0, weight=1)
+
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings")
+        tree.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        for col in columns:
+            tree.heading(col, text=col)
+            tree.column(col, anchor="w", stretch=True, width=160)
+
+        for record in preview_records:
+            values = [record.get(col, "") for col in columns]
+            tree.insert("", "end", values=values)
+
+        if len(records) > preview_limit:
+            note = f"(Доступно більше рядків: всього {len(records)}.)"
+            ctk.CTkLabel(preview_window, text=note, anchor="w").pack(fill="x", padx=14, pady=(0, 10))
+
+        ctk.CTkButton(preview_window, text="Закрити", command=preview_window.destroy).pack(pady=(0, 12))
 
     def _generate(self):
         self._progress_reset("Підготовка...")
