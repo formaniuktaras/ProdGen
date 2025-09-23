@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import csv
 import json
 import re
 import sqlite3
@@ -12,33 +13,76 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+
+def _show_dependency_error(message: str) -> None:
+    """Display a blocking error for a missing runtime dependency."""
+
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(APP_TITLE, message)
+    except Exception:
+        print(message, file=sys.stderr)
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+DEPENDENCY_WARNINGS = []
+
 try:
     import customtkinter as ctk
 except ModuleNotFoundError:
-    _MISSING_CUSTOMTKINTER_MESSAGE = (
+    _show_dependency_error(
         "Бібліотека CustomTkinter не знайдена.\n"
         "Встановіть її командою 'pip install customtkinter' і перезапустіть застосунок."
     )
-
-    def _notify_missing_customtkinter():
-        root = None
-        try:
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showerror(APP_TITLE, _MISSING_CUSTOMTKINTER_MESSAGE)
-        except Exception:
-            print(_MISSING_CUSTOMTKINTER_MESSAGE, file=sys.stderr)
-        finally:
-            if root is not None:
-                try:
-                    root.destroy()
-                except Exception:
-                    pass
-
-    _notify_missing_customtkinter()
     sys.exit(1)
-import pandas as pd
-from jinja2 import Template, TemplateError
+
+PANDAS_IMPORT_ERROR_DETAIL = ""
+PANDAS_EXPORT_BLOCKED_MESSAGE = ""
+
+try:
+    import pandas as pd
+except ModuleNotFoundError as exc:
+    pd = None
+    PANDAS_IMPORT_ERROR_DETAIL = str(exc)
+    PANDAS_EXPORT_BLOCKED_MESSAGE = (
+        "Експорт у формат Excel (.xlsx) недоступний: бібліотека pandas не встановлена."
+    )
+except ImportError as exc:  # e.g. missing binary dependencies
+    pd = None
+    PANDAS_IMPORT_ERROR_DETAIL = str(exc)
+    PANDAS_EXPORT_BLOCKED_MESSAGE = (
+        "Експорт у формат Excel (.xlsx) недоступний: не вдалося завантажити бібліотеку pandas."
+    )
+else:
+    PANDAS_IMPORT_ERROR_DETAIL = ""
+    PANDAS_EXPORT_BLOCKED_MESSAGE = ""
+
+if PANDAS_EXPORT_BLOCKED_MESSAGE:
+    detail_suffix = f"\nДеталі: {PANDAS_IMPORT_ERROR_DETAIL}" if PANDAS_IMPORT_ERROR_DETAIL else ""
+    DEPENDENCY_WARNINGS.append(
+        PANDAS_EXPORT_BLOCKED_MESSAGE
+        + detail_suffix
+        + "\nВстановіть бібліотеку командою 'pip install pandas' і перезапустіть застосунок, щоб увімкнути цей формат."
+        + "\nЕкспорт у CSV (.csv) та JSON (.json) залишається доступним."
+    )
+else:
+    PANDAS_IMPORT_ERROR_DETAIL = ""
+
+try:
+    from jinja2 import Template, TemplateError
+except ModuleNotFoundError:
+    _show_dependency_error(
+        "Бібліотека Jinja2 не знайдена.\n"
+        "Встановіть її командою 'pip install jinja2' і перезапустіть застосунок."
+    )
+    sys.exit(1)
 
 DB_FILE = "catalog.db"
 TEMPLATES_FILE = "templates.json"
@@ -136,6 +180,14 @@ DEFAULT_EXPORT_FIELDS = [
     {"field": "Одиниця_виміру,_Характеристики", "enabled": False, "template": ""},
     {"field": "Значення_Характеристики", "enabled": False, "template": "{{ spec_items | map(attribute=1) | join('; ') }}"},
 ]
+
+EXPORT_FORMAT_OPTIONS = ("Excel (.xlsx)", "CSV (.csv)", "JSON (.json)")
+
+
+def get_available_export_formats():
+    if pd is None:
+        return [fmt for fmt in EXPORT_FORMAT_OPTIONS if fmt != "Excel (.xlsx)"]
+    return list(EXPORT_FORMAT_OPTIONS)
 
 def _title_tags_block(title: str, tags: str) -> dict:
     return {
@@ -842,11 +894,27 @@ def export_products(records: list, columns: list, fmt: str, folder: str):
     base = os.path.join(folder, f"products_{ts}")
 
     if fmt == "Excel (.xlsx)":
+        if pd is None:
+            message = PANDAS_EXPORT_BLOCKED_MESSAGE or "Експорт у Excel недоступний."
+            if PANDAS_IMPORT_ERROR_DETAIL and PANDAS_IMPORT_ERROR_DETAIL not in message:
+                message = f"{message} (деталі: {PANDAS_IMPORT_ERROR_DETAIL})"
+            raise RuntimeError(message)
         out_products = base + ".xlsx"
         pd.DataFrame.from_records(records, columns=columns).to_excel(out_products, index=False)
     elif fmt == "CSV (.csv)":
         out_products = base + ".csv"
-        pd.DataFrame.from_records(records, columns=columns).to_csv(out_products, index=False, encoding="utf-8-sig")
+        if pd is not None:
+            pd.DataFrame.from_records(records, columns=columns).to_csv(
+                out_products, index=False, encoding="utf-8-sig"
+            )
+        else:
+            with open(out_products, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                if columns:
+                    writer.writerow(columns)
+                for record in records:
+                    row = [record.get(col, "") for col in columns]
+                    writer.writerow(row)
     else:
         out_products = base + ".json"
         with open(out_products, "w", encoding="utf-8") as f:
@@ -1083,6 +1151,9 @@ class App(ctk.CTk):
         self._refresh_categories()
         self._refresh_filmtype_checkboxes()
 
+        if DEPENDENCY_WARNINGS:
+            self.after(200, self._show_dependency_warnings)
+
     # -------- верхній бар
     def _build_header(self):
         top = ctk.CTkFrame(self)
@@ -1109,6 +1180,11 @@ class App(ctk.CTk):
         self._build_tab_templates()
         self._build_tab_export()
         self._build_tab_generate()
+
+    def _show_dependency_warnings(self):
+        for warning in DEPENDENCY_WARNINGS:
+            messagebox.showwarning(APP_TITLE, warning)
+        DEPENDENCY_WARNINGS.clear()
 
     def _film_type_names(self):
         return [item.get("name") for item in self.templates.get("film_types", []) if item.get("name")]
@@ -1947,10 +2023,14 @@ class App(ctk.CTk):
         fmt_frame = ctk.CTkFrame(right)
         fmt_frame.pack(fill="x", padx=10, pady=(6, 6))
         ctk.CTkLabel(fmt_frame, text="Формат експорту:").pack(anchor="w", padx=6, pady=(4, 4))
-        self.export_fmt_var = tk.StringVar(value="Excel (.xlsx)")
+        export_formats = get_available_export_formats()
+        if not export_formats:
+            export_formats = ["JSON (.json)"]
+        default_format = export_formats[0]
+        self.export_fmt_var = tk.StringVar(value=default_format)
         self.export_fmt_menu = ctk.CTkOptionMenu(
             fmt_frame,
-            values=["Excel (.xlsx)", "CSV (.csv)", "JSON (.json)"],
+            values=export_formats,
             variable=self.export_fmt_var,
             width=200,
         )
