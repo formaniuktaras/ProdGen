@@ -3,17 +3,43 @@ import os
 import json
 import re
 import sqlite3
+import sys
 import time
+
+APP_TITLE = "Prom Generator"
 from copy import deepcopy
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-import customtkinter as ctk
+try:
+    import customtkinter as ctk
+except ModuleNotFoundError:
+    _MISSING_CUSTOMTKINTER_MESSAGE = (
+        "Бібліотека CustomTkinter не знайдена.\n"
+        "Встановіть її командою 'pip install customtkinter' і перезапустіть застосунок."
+    )
+
+    def _notify_missing_customtkinter():
+        root = None
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror(APP_TITLE, _MISSING_CUSTOMTKINTER_MESSAGE)
+        except Exception:
+            print(_MISSING_CUSTOMTKINTER_MESSAGE, file=sys.stderr)
+        finally:
+            if root is not None:
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+
+    _notify_missing_customtkinter()
+    sys.exit(1)
 import pandas as pd
 from jinja2 import Template, TemplateError
 
-APP_TITLE = "Prom Generator"
 DB_FILE = "catalog.db"
 TEMPLATES_FILE = "templates.json"
 EXPORT_FIELDS_FILE = "export_fields.json"
