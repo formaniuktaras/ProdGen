@@ -1,16 +1,50 @@
 # -*- coding: utf-8 -*-
 import os
+import csv
 import json
 import re
 import sqlite3
 import sys
 import time
+from itertools import islice
 
 APP_TITLE = "Prom Generator"
 from copy import deepcopy
 from datetime import datetime
+from typing import Optional
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
+
+from formula_engine import FormulaEngine, FormulaError
+
+
+def _show_dependency_error(message: str) -> None:
+    """Display a blocking error for a missing runtime dependency."""
+
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(APP_TITLE, message)
+    except Exception:
+        print(message, file=sys.stderr)
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+DEPENDENCY_WARNINGS = []
+
+CSV_JSON_FALLBACK_NOTE = "\nЕкспорт у CSV (.csv) та JSON (.json) залишається доступним."
+PANDAS_INSTALL_HINT = (
+    "Встановіть бібліотеку командою 'pip install pandas' і перезапустіть застосунок, щоб увімкнути цей формат."
+)
+OPENPYXL_INSTALL_HINT = (
+    "Встановіть бібліотеку командою 'pip install openpyxl' і перезапустіть застосунок, щоб увімкнути цей формат."
+)
 
 
 def _show_dependency_error(message: str) -> None:
@@ -63,6 +97,7 @@ TEMPLATES_FILE = "templates.json"
 EXPORT_FIELDS_FILE = "export_fields.json"
 TITLE_TAGS_FILE = "title_tags_templates.json"
 FILM_TYPE_DEFAULT_LABEL = "Універсальний шаблон"
+CATEGORY_SCOPE_DEFAULT_LABEL = "Для всіх категорій"
 
 # ============================ ШАБЛОНИ / НАЛАШТУВАННЯ ============================
 
@@ -155,6 +190,17 @@ DEFAULT_EXPORT_FIELDS = [
     {"field": "Значення_Характеристики", "enabled": False, "template": "{{ spec_items | map(attribute=1) | join('; ') }}"},
 ]
 
+EXCEL_FORMAT_LABEL = "Excel (.xlsx)"
+CSV_FORMAT_LABEL = "CSV (.csv)"
+JSON_FORMAT_LABEL = "JSON (.json)"
+EXPORT_FORMAT_OPTIONS = (EXCEL_FORMAT_LABEL, CSV_FORMAT_LABEL, JSON_FORMAT_LABEL)
+
+
+def get_available_export_formats():
+    if pd is None or EXCEL_EXPORT_BLOCKED_MESSAGE:
+        return [fmt for fmt in EXPORT_FORMAT_OPTIONS if fmt != EXCEL_FORMAT_LABEL]
+    return list(EXPORT_FORMAT_OPTIONS)
+
 def _title_tags_block(title: str, tags: str) -> dict:
     return {
         "title_template": title,
@@ -163,9 +209,11 @@ def _title_tags_block(title: str, tags: str) -> dict:
 
 def _build_title_tags_defaults(film_type_names, base_title, base_tags):
     base_block = _title_tags_block(base_title, base_tags)
-    data = {"default": base_block.copy()}
-    for name in film_type_names:
-        data[name] = base_block.copy()
+    data = {
+        "default": base_block.copy(),
+        "by_film": {name: base_block.copy() for name in film_type_names},
+        "by_category": {},
+    }
     return data
 
 def load_templates():
@@ -197,6 +245,19 @@ def save_templates(dct):
     with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
         json.dump(dct, f, ensure_ascii=False, indent=2)
 
+def _normalize_title_tags_block(block: dict, fallback: dict) -> dict:
+    if not isinstance(block, dict):
+        block = {}
+    normalized = {}
+    for key in ("title_template", "tags_template"):
+        value = block.get(key)
+        if isinstance(value, str):
+            normalized[key] = value
+        else:
+            normalized[key] = fallback.get(key, "")
+    return normalized
+
+
 def load_title_tags_templates(templates: dict):
     film_type_names = [item.get("name") for item in templates.get("film_types", []) if item.get("name")]
     base_title = templates.get("title_template", DEFAULT_TEMPLATES["title_template"])
@@ -210,52 +271,125 @@ def load_title_tags_templates(templates: dict):
     with open(TITLE_TAGS_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
 
+    if not isinstance(data, dict):
+        save_title_tags_templates(defaults)
+        return defaults
+
     changed = False
 
-    if "default" not in data or not isinstance(data["default"], dict):
-        data["default"] = defaults["default"].copy()
+    legacy_film_blocks = {}
+    for key in list(data.keys()):
+        if key in ("default", "by_film", "by_category"):
+            continue
+        value = data.pop(key)
+        if isinstance(value, dict):
+            legacy_film_blocks[key] = value
+            changed = True
+
+    default_block = _normalize_title_tags_block(data.get("default"), defaults["default"])
+    by_film_raw = data.get("by_film")
+    if not isinstance(by_film_raw, dict):
+        by_film_raw = {}
+        changed = True
+    by_category_raw = data.get("by_category")
+    if not isinstance(by_category_raw, dict):
+        by_category_raw = {}
         changed = True
 
-    for key in ("title_template", "tags_template"):
-        if key not in data["default"]:
-            data["default"][key] = defaults["default"][key]
-            changed = True
+    for name, block in legacy_film_blocks.items():
+        by_film_raw[name] = _normalize_title_tags_block(block, default_block)
+
+    normalized_by_film = {}
+    for name, block in by_film_raw.items():
+        normalized_by_film[name] = _normalize_title_tags_block(block, default_block)
 
     for name in film_type_names:
-        block = data.get(name)
-        if not isinstance(block, dict):
-            data[name] = defaults["default"].copy()
+        if name not in normalized_by_film:
+            normalized_by_film[name] = _normalize_title_tags_block({}, default_block)
+            changed = True
+
+    normalized_by_category = {}
+    for cat_name, cat_block in by_category_raw.items():
+        if not isinstance(cat_block, dict):
             changed = True
             continue
-        for key in ("title_template", "tags_template"):
-            if key not in block:
-                block[key] = data["default"].get(key, defaults["default"][key])
+        cat_default = _normalize_title_tags_block(cat_block.get("default"), default_block)
+        cat_films_raw = cat_block.get("by_film")
+        if not isinstance(cat_films_raw, dict):
+            cat_films_raw = {}
+            changed = True
+        normalized_cat_films = {}
+        for film_name, block in cat_films_raw.items():
+            normalized_cat_films[film_name] = _normalize_title_tags_block(block, cat_default)
+        for film_name in film_type_names:
+            if film_name not in normalized_cat_films:
+                normalized_cat_films[film_name] = _normalize_title_tags_block({}, cat_default)
                 changed = True
+        normalized_by_category[cat_name] = {
+            "default": cat_default,
+            "by_film": normalized_cat_films,
+        }
 
-    if changed:
-        save_title_tags_templates(data)
+    normalized = {
+        "default": default_block,
+        "by_film": normalized_by_film,
+        "by_category": normalized_by_category,
+    }
 
-    return data
+    if normalized != data or changed:
+        save_title_tags_templates(normalized)
+        return normalized
+
+    return normalized
 
 def save_title_tags_templates(dct):
     with open(TITLE_TAGS_FILE, "w", encoding="utf-8") as f:
         json.dump(dct, f, ensure_ascii=False, indent=2)
 
-def resolve_title_tags(title_tags_templates: dict, templates: dict, film_type: str):
+def resolve_title_tags(title_tags_templates: dict, templates: dict, category: Optional[str], film_type: str):
     fallback_title = templates.get("title_template", DEFAULT_TEMPLATES["title_template"])
     fallback_tags = templates.get("tags_template", DEFAULT_TEMPLATES["tags_template"])
+
     default_block = title_tags_templates.get("default", {})
-    film_block = title_tags_templates.get(film_type, {})
-    title_template = (
-        film_block.get("title_template")
-        or default_block.get("title_template")
-        or fallback_title
-    )
-    tags_template = (
-        film_block.get("tags_template")
-        or default_block.get("tags_template")
-        or fallback_tags
-    )
+    by_film = title_tags_templates.get("by_film", {})
+    by_category = title_tags_templates.get("by_category", {})
+
+    if not isinstance(default_block, dict):
+        default_block = {}
+    if not isinstance(by_film, dict):
+        by_film = {}
+    if not isinstance(by_category, dict):
+        by_category = {}
+
+    cat_block = {}
+    if category:
+        cat_block = by_category.get(category, {})
+        if not isinstance(cat_block, dict):
+            cat_block = {}
+    cat_default = cat_block.get("default", {}) if isinstance(cat_block, dict) else {}
+    if not isinstance(cat_default, dict):
+        cat_default = {}
+    cat_by_film = cat_block.get("by_film", {}) if isinstance(cat_block, dict) else {}
+    if not isinstance(cat_by_film, dict):
+        cat_by_film = {}
+    cat_film_block = cat_by_film.get(film_type, {})
+    if not isinstance(cat_film_block, dict):
+        cat_film_block = {}
+
+    film_block = by_film.get(film_type, {})
+    if not isinstance(film_block, dict):
+        film_block = {}
+
+    def resolve_value(key: str, default_value: str) -> str:
+        for block in (cat_film_block, cat_default, film_block, default_block):
+            if isinstance(block, dict):
+                value = block.get(key)
+                if isinstance(value, str):
+                    return value
+        return default_value
+
+    title_template = resolve_value("title_template", fallback_title)
+    tags_template = resolve_value("tags_template", fallback_tags)
     return title_template, tags_template
 
 
@@ -635,6 +769,153 @@ def load_specs_map(model_ids):
         specs_map.setdefault(model_id, {})[key] = value
     return specs_map
 
+# ============================ ФОРМУЛИ ============================
+
+_FORMULA_PREFIX_RE = re.compile(r"^\s*=")
+_IDENTIFIER_SANITIZE_RE = re.compile(r"[^\w]+", re.UNICODE)
+_ASCII_SANITIZE_RE = re.compile(r"[^0-9a-z]+")
+
+_TRANSLIT_TABLE = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "h",
+    "ґ": "g",
+    "д": "d",
+    "е": "e",
+    "є": "ie",
+    "ж": "zh",
+    "з": "z",
+    "и": "y",
+    "і": "i",
+    "ї": "yi",
+    "й": "y",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "kh",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "shch",
+    "ь": "",
+    "ю": "yu",
+    "я": "ya",
+    "ъ": "",
+    "ы": "y",
+    "э": "e",
+    "ё": "yo",
+}
+
+_COMMON_SPEC_ALIAS = {
+    "color": "color",
+    "colour": "color",
+    "kolir": "color",
+    "колір": "color",
+    "цвет": "color",
+    "brand": "brand",
+    "бренд": "brand",
+    "weight": "weight",
+    "вага": "weight",
+    "вес": "weight",
+    "material": "material",
+    "матеріал": "material",
+    "материал": "material",
+    "thickness": "thickness",
+    "товщина": "thickness",
+    "толщина": "thickness",
+    "sku": "sku",
+    "код": "sku",
+    "код_товару": "sku",
+}
+
+
+def _looks_like_formula(text: str) -> bool:
+    return bool(text) and bool(_FORMULA_PREFIX_RE.match(text))
+
+
+def _normalize_identifier(value: str) -> str:
+    lowered = value.strip().lower()
+    cleaned = _IDENTIFIER_SANITIZE_RE.sub("_", lowered)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    return cleaned
+
+
+def _transliterate_ascii(value: str) -> str:
+    result = []
+    for ch in value.lower():
+        if ch.isdigit():
+            result.append(ch)
+            continue
+        if "a" <= ch <= "z":
+            result.append(ch)
+            continue
+        if ch in _TRANSLIT_TABLE:
+            result.append(_TRANSLIT_TABLE[ch])
+            continue
+        if ch == "_" or ch.isspace():
+            result.append("_")
+        else:
+            result.append("")
+    ascii_candidate = "".join(result)
+    ascii_candidate = _ASCII_SANITIZE_RE.sub("_", ascii_candidate)
+    ascii_candidate = re.sub(r"_+", "_", ascii_candidate).strip("_")
+    return ascii_candidate
+
+
+def _build_formula_context(base_context):
+    formula_context = {}
+    for key, value in base_context.items():
+        if callable(value):
+            continue
+        formula_context[key] = value
+
+    if "brand" in base_context and "attr_brand" not in formula_context:
+        formula_context["attr_brand"] = base_context.get("brand")
+    if "model" in base_context and "attr_model" not in formula_context:
+        formula_context["attr_model"] = base_context.get("model")
+
+    specs = base_context.get("specs")
+    if isinstance(specs, dict):
+        for spec_key, spec_value in specs.items():
+            if spec_value is None:
+                continue
+            key_str = str(spec_key)
+            normalized = _normalize_identifier(key_str)
+            ascii_name = _transliterate_ascii(key_str)
+            for candidate in (normalized, ascii_name):
+                if candidate:
+                    formula_context.setdefault(f"attr_{candidate}", spec_value)
+            alias_source = None
+            if ascii_name and ascii_name in _COMMON_SPEC_ALIAS:
+                alias_source = _COMMON_SPEC_ALIAS[ascii_name]
+            elif normalized and normalized in _COMMON_SPEC_ALIAS:
+                alias_source = _COMMON_SPEC_ALIAS[normalized]
+            if alias_source:
+                formula_context.setdefault(f"attr_{alias_source}", spec_value)
+
+    category_name = base_context.get("category")
+    if isinstance(category_name, str):
+        cat_slug = _transliterate_ascii(category_name) or _normalize_identifier(category_name)
+        if cat_slug:
+            formula_context.setdefault(f"category_{cat_slug}", category_name)
+
+    film_type = base_context.get("film_type")
+    if isinstance(film_type, str):
+        ft_slug = _transliterate_ascii(film_type) or _normalize_identifier(film_type)
+        if ft_slug:
+            formula_context.setdefault(f"film_type_{ft_slug}", film_type)
+
+    return formula_context
+
 # ============================ ГЕНЕРАЦІЯ ============================
 
 def _normalize_id_list(ids):
@@ -761,23 +1042,29 @@ def generate_export_rows(
         cat_desc_block = descriptions.get(cat, {}) if isinstance(descriptions, dict) else {}
         for f in film_types:
             film_type = f if isinstance(f, str) else str(f)
-            if film_type not in title_tags_cache:
-                title_tpl_str, tags_tpl_str = resolve_title_tags(title_tags_templates, templates, film_type)
+            cache_key = (cat, film_type)
+            if cache_key not in title_tags_cache:
+                title_tpl_str, tags_tpl_str = resolve_title_tags(
+                    title_tags_templates,
+                    templates,
+                    cat,
+                    film_type,
+                )
                 try:
                     title_tpl = Template(title_tpl_str)
                     tags_tpl = Template(tags_tpl_str)
                 except TemplateError as exc:
                     raise ValueError(
-                        f"Помилка в шаблонах заголовку/тегів для типу \"{film_type}\": {exc}"
+                        f"Помилка в шаблонах заголовку/тегів для категорії \"{cat}\" і типу \"{film_type}\": {exc}"
                     ) from exc
-                title_tags_cache[film_type] = (title_tpl, tags_tpl)
-            title_t, tags_t = title_tags_cache[film_type]
+                title_tags_cache[cache_key] = (title_tpl, tags_tpl)
+            title_t, tags_t = title_tags_cache[cache_key]
             try:
                 title_value = title_t.render(film_type=film_type, brand=brand, model=model, category=cat)
                 tags_value = tags_t.render(film_type=film_type, brand=brand, model=model, category=cat)
             except TemplateError as exc:
                 raise ValueError(
-                    f"Не вдалося згенерувати заголовок або теги для типу \"{film_type}\": {exc}"
+                    f"Не вдалося згенерувати заголовок або теги для категорії \"{cat}\" і типу \"{film_type}\": {exc}"
                 ) from exc
 
             desc_key = (cat, film_type)
@@ -820,55 +1107,135 @@ def generate_export_rows(
                 "now": now_value,
             }
 
-            record = {}
+            row_values = []
+            formula_context = None
             for field in enabled_fields:
                 field_name = field["field"]
                 tpl_str = field.get("template", "")
                 if tpl_str:
-                    tpl = field_template_cache.get(tpl_str)
-                    if tpl is None:
+                    if _looks_like_formula(tpl_str):
+                        if formula_context is None:
+                            formula_context = _build_formula_context(context)
                         try:
-                            tpl = Template(tpl_str)
+                            value = FormulaEngine.evaluate(tpl_str, formula_context)
+                        except FormulaError as exc:
+                            raise ValueError(
+                                f"Помилка у формулі поля \"{field_name}\": {exc}"
+                            ) from exc
+                    else:
+                        tpl = field_template_cache.get(tpl_str)
+                        if tpl is None:
+                            try:
+                                tpl = Template(tpl_str)
+                            except TemplateError as exc:
+                                raise ValueError(
+                                    f"Помилка в шаблоні поля \"{field_name}\": {exc}"
+                                ) from exc
+                            field_template_cache[tpl_str] = tpl
+                        try:
+                            value = tpl.render(**context)
                         except TemplateError as exc:
                             raise ValueError(
-                                f"Помилка в шаблоні поля \"{field_name}\": {exc}"
+                                f"Не вдалося згенерувати значення поля \"{field_name}\": {exc}"
                             ) from exc
-                        field_template_cache[tpl_str] = tpl
-                    try:
-                        value = tpl.render(**context)
-                    except TemplateError as exc:
-                        raise ValueError(
-                            f"Не вдалося згенерувати значення поля \"{field_name}\": {exc}"
-                        ) from exc
                 else:
                     value = context.get(field_name, "")
                 if value is None:
                     value = ""
                 elif not isinstance(value, str):
                     value = str(value)
-                record[field_name] = value
-            rows.append(record)
+                row_values.append(value)
+            rows.append(row_values)
             progress_count += 1
             if progress_callback is not None:
                 progress_callback(progress_count, total_steps)
 
     return rows, column_order
 
+
+def _row_to_values(record, columns):
+    if isinstance(record, dict):
+        return [record.get(name, "") for name in columns]
+    if isinstance(record, (list, tuple)):
+        values = list(record)
+        if len(values) < len(columns):
+            values.extend([""] * (len(columns) - len(values)))
+        elif len(values) > len(columns):
+            values = values[: len(columns)]
+        return values
+    return ["" for _ in columns]
+
+
+def _make_unique_column_keys(columns):
+    counts = {}
+    unique_keys = []
+    for name in columns:
+        count = counts.get(name, 0) + 1
+        counts[name] = count
+        if count == 1:
+            unique_keys.append(name)
+        else:
+            unique_keys.append(f"{name}__{count}")
+    return unique_keys
+
+
 def export_products(records: list, columns: list, fmt: str, folder: str):
     ensure_folder(folder)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     base = os.path.join(folder, f"products_{ts}")
 
-    if fmt == "Excel (.xlsx)":
+    if fmt == EXCEL_FORMAT_LABEL:
+        if pd is None or EXCEL_EXPORT_BLOCKED_MESSAGE:
+            if pd is None:
+                message = PANDAS_EXPORT_BLOCKED_MESSAGE or "Експорт у Excel недоступний."
+                detail = PANDAS_IMPORT_ERROR_DETAIL
+                install_hint = PANDAS_INSTALL_HINT
+            else:
+                message = EXCEL_EXPORT_BLOCKED_MESSAGE or "Експорт у Excel недоступний."
+                detail = EXCEL_ENGINE_IMPORT_ERROR_DETAIL
+                install_hint = OPENPYXL_INSTALL_HINT
+            if detail and detail not in message:
+                message = f"{message} (деталі: {detail})"
+            message = f"{message}\n{install_hint}{CSV_JSON_FALLBACK_NOTE}"
+            raise RuntimeError(message)
         out_products = base + ".xlsx"
-        pd.DataFrame.from_records(records, columns=columns).to_excel(out_products, index=False)
-    elif fmt == "CSV (.csv)":
+        df = pd.DataFrame.from_records(records, columns=columns)
+        try:
+            df.to_excel(out_products, index=False)
+        except (ImportError, ModuleNotFoundError) as exc:
+            exc_text = str(exc)
+            if "openpyxl" in exc_text.lower():
+                message = (
+                    "Не вдалося зберегти Excel-файл: бібліотека openpyxl не встановлена або пошкоджена.\n"
+                    "Встановіть її командою 'pip install openpyxl' і перезапустіть застосунок, або оберіть інший формат експорту."
+                )
+                raise RuntimeError(message) from exc
+            raise
+    elif fmt == CSV_FORMAT_LABEL:
         out_products = base + ".csv"
-        pd.DataFrame.from_records(records, columns=columns).to_csv(out_products, index=False, encoding="utf-8-sig")
-    else:
+        if pd is not None:
+            pd.DataFrame.from_records(records, columns=columns).to_csv(
+                out_products, index=False, encoding="utf-8-sig"
+            )
+        else:
+            with open(out_products, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                if columns:
+                    writer.writerow(columns)
+                for record in records:
+                    row = _row_to_values(record, columns)
+                    writer.writerow(row)
+    elif fmt == JSON_FORMAT_LABEL:
         out_products = base + ".json"
+        json_records = []
+        json_columns = _make_unique_column_keys(columns)
+        for record in records:
+            values = _row_to_values(record, columns)
+            json_records.append({key: value for key, value in zip(json_columns, values)})
         with open(out_products, "w", encoding="utf-8") as f:
-            json.dump(records, f, ensure_ascii=False, indent=2)
+            json.dump(json_records, f, ensure_ascii=False, indent=2)
+    else:
+        raise ValueError(f"Невідомий формат експорту: {fmt}")
 
     return out_products
 
@@ -1059,9 +1426,50 @@ class SpecsWindow(ctk.CTkToplevel):
 
 # ============================ GUI: ОСНОВНИЙ ДОДАТОК ============================
 
+class _TkAppCompatProxy:
+    """Proxy that allows attaching arbitrary Python attributes to a tkapp."""
+
+    __slots__ = ("_tkapp", "_extras")
+
+    def __init__(self, tkapp):
+        object.__setattr__(self, "_tkapp", tkapp)
+        object.__setattr__(self, "_extras", {})
+
+    def __getattr__(self, name):
+        extras = object.__getattribute__(self, "_extras")
+        if name in extras:
+            return extras[name]
+        return getattr(object.__getattribute__(self, "_tkapp"), name)
+
+    def __setattr__(self, name, value):
+        if name in {"_tkapp", "_extras"}:
+            object.__setattr__(self, name, value)
+            return
+        extras = object.__getattribute__(self, "_extras")
+        extras[name] = value
+
+    def __delattr__(self, name):
+        if name in {"_tkapp", "_extras"}:
+            raise AttributeError(name)
+        extras = object.__getattribute__(self, "_extras")
+        if name in extras:
+            del extras[name]
+            return
+        delattr(object.__getattribute__(self, "_tkapp"), name)
+
+    def __dir__(self):
+        extras = object.__getattribute__(self, "_extras")
+        base_dir = dir(object.__getattribute__(self, "_tkapp"))
+        return sorted(set(base_dir).union(extras.keys()))
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
+        raw_tkapp = object.__getattribute__(self, "tk")
+        if not isinstance(raw_tkapp, _TkAppCompatProxy):
+            object.__setattr__(self, "tk", _TkAppCompatProxy(raw_tkapp))
+        tkapp = object.__getattribute__(self, "tk")
         self.title(APP_TITLE)
         self.geometry("1100x680")
         self.minsize(980, 640)
@@ -1074,8 +1482,12 @@ class App(ctk.CTk):
         self.current_category_id = None
         self.current_brand_id = None
         self._current_film_type_key = None
-        self._film_type_display_to_key = {}
-        self._film_type_key_to_display = {}
+        self._current_desc_category = None
+        self._current_template_category = None
+        self._template_category_label_to_key = {}
+        self._template_category_key_to_label = {}
+        self._template_film_label_to_key = {}
+        self._template_film_key_to_label = {}
         self._gen_tree = None
         self._gen_tree_states = {}
         self._gen_tree_meta = {}
@@ -1093,6 +1505,17 @@ class App(ctk.CTk):
         self._export_tree_updating = False
         self.progress_bar = None
         self.progress_label = None
+        self._preview_window = None
+        # Compatibility: some flows expect the filmtype name variable to exist during tab
+        # construction even if the dedicated film type tab is hidden. Older widgets access
+        # the variable through the low-level Tk interpreter (self.tk), so expose it there
+        # via a proxy that can store Python attributes.
+        self.filmtype_name_var = tk.StringVar(master=self, value="")
+        tkapp.filmtype_name_var = self.filmtype_name_var
+
+        self.filmtype_enabled_var = tk.BooleanVar(master=self, value=True)
+        tkapp.filmtype_enabled_var = self.filmtype_enabled_var
+
 
         self._build_header()
         self._build_tabs()
@@ -1100,6 +1523,183 @@ class App(ctk.CTk):
         # Початкові дані
         self._refresh_categories()
         self._refresh_filmtype_checkboxes()
+
+        if DEPENDENCY_WARNINGS:
+            self.after(200, self._show_dependency_warnings)
+
+    def _sync_templates_with_catalog(self):
+        categories = [name.strip() for _cid, name in get_categories() if isinstance(name, str) and name.strip()]
+        descriptions = self.templates.setdefault("descriptions", {})
+        changed_templates = False
+        for name in categories:
+            if name not in descriptions:
+                descriptions[name] = {}
+                changed_templates = True
+        if changed_templates:
+            save_templates(self.templates)
+
+        changed_title_tags = False
+        for name in categories:
+            if self._ensure_title_tags_category(name):
+                changed_title_tags = True
+
+        for item in self.templates.get("film_types", []):
+            fname = item.get("name")
+            if isinstance(fname, str) and fname:
+                if self._ensure_title_tags_film(fname):
+                    changed_title_tags = True
+
+        if changed_title_tags:
+            save_title_tags_templates(self.title_tags_templates)
+
+    def _ensure_title_tags_category(self, category_name: str) -> bool:
+        if not category_name:
+            return False
+        by_category = self.title_tags_templates.setdefault("by_category", {})
+        changed = False
+        cat_entry = by_category.get(category_name)
+        if not isinstance(cat_entry, dict):
+            by_category[category_name] = {"default": {}, "by_film": {}}
+            return True
+        if "default" not in cat_entry or not isinstance(cat_entry["default"], dict):
+            cat_entry["default"] = {}
+            changed = True
+        if "by_film" not in cat_entry or not isinstance(cat_entry["by_film"], dict):
+            cat_entry["by_film"] = {}
+            changed = True
+        return changed
+
+    def _ensure_title_tags_film(self, film_name: str) -> bool:
+        if not film_name:
+            return False
+        by_film = self.title_tags_templates.setdefault("by_film", {})
+        block = by_film.get(film_name)
+        if not isinstance(block, dict):
+            by_film[film_name] = {}
+            return True
+        return False
+
+    def _rename_category_templates(self, old_name: str, new_name: str):
+        if not old_name or not new_name or old_name == new_name:
+            return
+        descriptions = self.templates.setdefault("descriptions", {})
+        changed_templates = False
+        old_block = descriptions.pop(old_name, None)
+        if isinstance(old_block, dict):
+            target = descriptions.get(new_name)
+            if isinstance(target, dict):
+                for key, value in old_block.items():
+                    if key not in target:
+                        target[key] = value
+            else:
+                descriptions[new_name] = old_block
+            changed_templates = True
+
+        by_category = self.title_tags_templates.setdefault("by_category", {})
+        changed_title_tags = False
+        old_cat_block = by_category.pop(old_name, None)
+        if isinstance(old_cat_block, dict):
+            target_block = by_category.get(new_name)
+            if isinstance(target_block, dict):
+                if isinstance(old_cat_block.get("default"), dict) and not isinstance(target_block.get("default"), dict):
+                    target_block["default"] = old_cat_block["default"]
+                src_films = old_cat_block.get("by_film")
+                if isinstance(src_films, dict):
+                    dst_films = target_block.setdefault("by_film", {})
+                    for film_name, block in src_films.items():
+                        if film_name not in dst_films:
+                            dst_films[film_name] = block
+            else:
+                by_category[new_name] = old_cat_block
+            changed_title_tags = True
+
+        if changed_templates:
+            save_templates(self.templates)
+        if changed_title_tags or self._ensure_title_tags_category(new_name):
+            save_title_tags_templates(self.title_tags_templates)
+
+    def _delete_category_templates(self, category_name: str):
+        if not category_name:
+            return
+        descriptions = self.templates.get("descriptions", {})
+        changed_templates = False
+        if category_name in descriptions:
+            descriptions.pop(category_name, None)
+            changed_templates = True
+
+        by_category = self.title_tags_templates.get("by_category", {})
+        changed_title_tags = False
+        if isinstance(by_category, dict) and category_name in by_category:
+            by_category.pop(category_name, None)
+            changed_title_tags = True
+
+        if changed_templates:
+            save_templates(self.templates)
+        if changed_title_tags:
+            save_title_tags_templates(self.title_tags_templates)
+
+    def _rename_film_type(self, old_name: str, new_name: str):
+        if not old_name or not new_name or old_name == new_name:
+            return
+        changed_templates = False
+        for desc in self.templates.get("descriptions", {}).values():
+            if isinstance(desc, dict) and old_name in desc:
+                if new_name not in desc:
+                    desc[new_name] = desc.pop(old_name)
+                else:
+                    desc.pop(old_name, None)
+                changed_templates = True
+
+        by_film = self.title_tags_templates.setdefault("by_film", {})
+        changed_title_tags = False
+        if isinstance(by_film, dict) and old_name in by_film:
+            block = by_film.pop(old_name)
+            by_film[new_name] = block
+            changed_title_tags = True
+
+        for cat_block in self.title_tags_templates.setdefault("by_category", {}).values():
+            if not isinstance(cat_block, dict):
+                continue
+            films_map = cat_block.get("by_film")
+            if isinstance(films_map, dict) and old_name in films_map:
+                if new_name not in films_map:
+                    films_map[new_name] = films_map.pop(old_name)
+                else:
+                    films_map.pop(old_name, None)
+                changed_title_tags = True
+
+        if changed_templates:
+            save_templates(self.templates)
+        if changed_title_tags:
+            save_title_tags_templates(self.title_tags_templates)
+
+    def _remove_film_type_templates(self, film_name: str):
+        if not film_name:
+            return
+        changed_templates = False
+        for desc in self.templates.get("descriptions", {}).values():
+            if isinstance(desc, dict) and film_name in desc:
+                desc.pop(film_name, None)
+                changed_templates = True
+
+        by_film = self.title_tags_templates.get("by_film", {})
+        changed_title_tags = False
+        if isinstance(by_film, dict) and film_name in by_film:
+            by_film.pop(film_name, None)
+            changed_title_tags = True
+
+        for cat_block in self.title_tags_templates.get("by_category", {}).values():
+            if not isinstance(cat_block, dict):
+                continue
+            films_map = cat_block.get("by_film")
+            if isinstance(films_map, dict) and film_name in films_map:
+                films_map.pop(film_name, None)
+                changed_title_tags = True
+
+        if changed_templates:
+            save_templates(self.templates)
+        if changed_title_tags:
+            save_title_tags_templates(self.title_tags_templates)
 
     # -------- верхній бар
     def _build_header(self):
@@ -1120,13 +1720,20 @@ class App(ctk.CTk):
 
         self.tab_catalog   = tabs.add("Каталог")
         self.tab_templates = tabs.add("Шаблони")
+        self.tab_filmtypes = tabs.add("Типи плівок")
         self.tab_export    = tabs.add("Експорт")
         self.tab_generate  = tabs.add("Генерація")
 
         self._build_tab_catalog()
         self._build_tab_templates()
+        self._build_tab_filmtypes()
         self._build_tab_export()
         self._build_tab_generate()
+
+    def _show_dependency_warnings(self):
+        for warning in DEPENDENCY_WARNINGS:
+            messagebox.showwarning(APP_TITLE, warning)
+        DEPENDENCY_WARNINGS.clear()
 
     def _film_type_names(self):
         return [item.get("name") for item in self.templates.get("film_types", []) if item.get("name")]
@@ -1137,17 +1744,93 @@ class App(ctk.CTk):
             items.append((name, name))
         return items
 
-    def _film_type_key_from_display(self, label: str) -> str:
-        if not label:
-            return "default"
-        return self._film_type_display_to_key.get(label, "default")
+    def _template_category_items(self):
+        names = set()
+        for _cid, name in get_categories():
+            if isinstance(name, str):
+                stripped = name.strip()
+                if stripped:
+                    names.add(stripped)
+        for name in self.templates.get("descriptions", {}).keys():
+            if isinstance(name, str):
+                stripped = name.strip()
+                if stripped:
+                    names.add(stripped)
+        items = [(CATEGORY_SCOPE_DEFAULT_LABEL, None)]
+        for name in sorted(names):
+            items.append((name, name))
+        return items
+
+    def _refresh_template_selectors(self):
+        if not hasattr(self, "template_category_menu") or not hasattr(self, "template_film_menu"):
+            return
+
+        category_items = self._template_category_items()
+        if not category_items:
+            category_items = [(CATEGORY_SCOPE_DEFAULT_LABEL, None)]
+        film_items = self._film_type_menu_items()
+        if not film_items:
+            film_items = [(FILM_TYPE_DEFAULT_LABEL, "default")]
+
+        self._template_category_label_to_key = {label: key for label, key in category_items}
+        self._template_category_key_to_label = {key: label for label, key in category_items}
+        self._template_film_label_to_key = {label: key for label, key in film_items}
+        self._template_film_key_to_label = {key: label for label, key in film_items}
+
+        self.template_category_menu.configure(values=[label for label, _ in category_items])
+        self.template_film_menu.configure(values=[label for label, _ in film_items])
+
+        current_cat = self._current_template_category
+        if current_cat not in self._template_category_key_to_label:
+            current_cat = category_items[0][1]
+            if current_cat is None and len(category_items) > 1:
+                current_cat = category_items[1][1]
+        self._current_template_category = current_cat
+        category_label = self._template_category_key_to_label.get(current_cat, CATEGORY_SCOPE_DEFAULT_LABEL)
+        self.template_category_var.set(category_label)
+        self.template_category_menu.set(category_label)
+
+        current_film = self._selected_film_type_key()
+        if current_film not in self._template_film_key_to_label:
+            current_film = film_items[0][1]
+        self._current_film_type_key = current_film
+        film_label = self._template_film_key_to_label.get(current_film, FILM_TYPE_DEFAULT_LABEL)
+        self.template_film_var.set(film_label)
+        self.template_film_menu.set(film_label)
+
+        if current_cat and isinstance(current_cat, str):
+            self._current_desc_category = current_cat
+            if hasattr(self, "desc_cat_var"):
+                self.desc_cat_var.set(current_cat)
+
+        self._on_template_scope_change()
+
+    def _set_title_tags_block(self, category_key: Optional[str], film_key: str, title_value: str, tags_value: str):
+        block = {
+            "title_template": title_value,
+            "tags_template": tags_value,
+        }
+        if not isinstance(self.title_tags_templates.get("default"), dict):
+            self.title_tags_templates["default"] = block.copy()
+        if category_key:
+            self._ensure_title_tags_category(category_key)
+            cat_entry = self.title_tags_templates.setdefault("by_category", {}).setdefault(category_key, {"default": {}, "by_film": {}})
+            if film_key == "default":
+                cat_entry["default"] = block
+            else:
+                cat_entry.setdefault("by_film", {})[film_key] = block
+        else:
+            if film_key == "default":
+                self.title_tags_templates["default"] = block
+            else:
+                self.title_tags_templates.setdefault("by_film", {})[film_key] = block
 
     def _selected_film_type_key(self) -> str:
         key = getattr(self, "_current_film_type_key", None)
-        if key == "default":
+        if key in (None, ""):
+            self._current_film_type_key = "default"
             return "default"
-        names = set(self._film_type_names())
-        if key in names:
+        if key == "default" or key in set(self._film_type_names()):
             return key
         self._current_film_type_key = "default"
         return "default"
@@ -1370,6 +2053,8 @@ class App(ctk.CTk):
         self._refresh_brands(None)
         self._refresh_models(None)
         self._reload_gen_tree()
+        self._sync_templates_with_catalog()
+        self._refresh_template_selectors()
 
     def _refresh_brands(self, category_id):
         self.brand_tree.delete(*self.brand_tree.get_children())
@@ -1412,6 +2097,12 @@ class App(ctk.CTk):
         if not self.current_category_id: return show_error("Виберіть категорію.")
         name = self.cat_entry.get().strip()
         if not name: return show_error("Введіть нову назву категорії.")
+        sel = self.cat_tree.selection()
+        old_name = None
+        if sel:
+            old_val = self.cat_tree.item(sel[0], "values")
+            if old_val:
+                old_name = (old_val[0] or "").strip()
         cat_id = self.current_category_id
         result = rename_category(cat_id, name)
         if result is not True:
@@ -1419,6 +2110,13 @@ class App(ctk.CTk):
                 show_error("Категорія з такою назвою вже існує.")
             else:
                 show_error("Не вдалося перейменувати категорію.")
+        else:
+            if old_name:
+                self._rename_category_templates(old_name, name)
+            if self._current_template_category == old_name:
+                self._current_template_category = name
+            if self._current_desc_category == old_name:
+                self._current_desc_category = name
         self._refresh_categories()
         if cat_id:
             self.after(10, lambda: self._restore_tree_selection("cat", f"cat_{cat_id}"))
@@ -1435,8 +2133,26 @@ class App(ctk.CTk):
         if not messagebox.askyesno("Підтвердження", prompt):
             return
         ids = [int(iid.split("_")[1]) for iid in selection]
+        id_to_name = {}
+        for iid in selection:
+            parts = iid.split("_")
+            if len(parts) == 2:
+                try:
+                    cid = int(parts[1])
+                except ValueError:
+                    continue
+                values = self.cat_tree.item(iid, "values")
+                if values:
+                    id_to_name[cid] = (values[0] or "").strip()
         for cat_id in ids:
             delete_category(cat_id)
+            cat_name = id_to_name.get(cat_id)
+            if cat_name:
+                self._delete_category_templates(cat_name)
+                if self._current_template_category == cat_name:
+                    self._current_template_category = None
+                if self._current_desc_category == cat_name:
+                    self._current_desc_category = None
         self._refresh_categories()
 
     def _brand_add(self):
@@ -1542,27 +2258,38 @@ class App(ctk.CTk):
         wrap.pack(fill="both", expand=True, padx=10, pady=10)
 
         selector = ctk.CTkFrame(wrap)
-        selector.pack(fill="x", padx=10, pady=(6,2))
-        ctk.CTkLabel(selector, text="Тип плівки:").pack(side="left", padx=(0,6))
-        self.film_type_var = tk.StringVar(value="")
-        self.film_type_menu = ctk.CTkOptionMenu(
+        selector.pack(fill="x", padx=10, pady=(6, 2))
+        ctk.CTkLabel(selector, text="Категорія:").pack(side="left", padx=(0, 6))
+        self.template_category_var = tk.StringVar(value="")
+        self.template_category_menu = ctk.CTkOptionMenu(
             selector,
             values=["—"],
-            variable=self.film_type_var,
+            variable=self.template_category_var,
             width=220,
-            command=self._on_film_type_change
+            command=lambda _value: self._on_template_scope_change(),
         )
-        self.film_type_menu.pack(side="left")
+        self.template_category_menu.pack(side="left", padx=(0, 10))
+
+        ctk.CTkLabel(selector, text="Тип плівки:").pack(side="left", padx=(0, 6))
+        self.template_film_var = tk.StringVar(value="")
+        self.template_film_menu = ctk.CTkOptionMenu(
+            selector,
+            values=["—"],
+            variable=self.template_film_var,
+            width=220,
+            command=lambda _value: self._on_template_scope_change(),
+        )
+        self.template_film_menu.pack(side="left")
 
         # Ліва колонка: Заголовок і Теги
         left = ctk.CTkFrame(wrap)
-        left.pack(side="left", fill="both", expand=True, padx=(0,10), pady=5)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 10), pady=5)
 
-        ctk.CTkLabel(left, text="Шаблон заголовка ({{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10,0))
+        ctk.CTkLabel(left, text="Шаблон заголовка ({{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10, 0))
         self.title_box = ctk.CTkTextbox(left, height=80)
         self.title_box.pack(fill="x", padx=10, pady=5)
 
-        ctk.CTkLabel(left, text="Шаблон тегів ({{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10,0))
+        ctk.CTkLabel(left, text="Шаблон тегів ({{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10, 0))
         self.tags_box = ctk.CTkTextbox(left, height=110)
         self.tags_box.pack(fill="x", padx=10, pady=5)
 
@@ -1570,38 +2297,31 @@ class App(ctk.CTk):
 
         # Права колонка: Опис для Категорії + Типу плівки
         right = ctk.CTkFrame(wrap)
-        right.pack(side="left", fill="both", expand=True, padx=(10,0), pady=5)
+        right.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=5)
 
-        top = ctk.CTkFrame(right); top.pack(fill="x", padx=10, pady=5)
-        ctk.CTkLabel(top, text="Категорія:").pack(side="left", padx=(0,6))
-        self.desc_cat_var = tk.StringVar(value=list(self.templates["descriptions"].keys())[0])
-        self.desc_cat_menu = ctk.CTkOptionMenu(top, values=list(self.templates["descriptions"].keys()),
-                                               variable=self.desc_cat_var, width=200,
-                                               command=lambda _v: self._load_desc_template())
-        self.desc_cat_menu.pack(side="left")
-
-        ctk.CTkLabel(right, text="Шаблон опису (доступні {{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10,0))
+        ctk.CTkLabel(right, text="Шаблон опису (доступні {{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10, 0))
         self.desc_box = ctk.CTkTextbox(right)
         self.desc_box.pack(fill="both", expand=True, padx=10, pady=5)
 
-        btn_row = ctk.CTkFrame(right); btn_row.pack(fill="x", padx=10, pady=6)
-        ctk.CTkButton(btn_row, text="Зберегти опис", command=self._save_desc_template).pack(side="right")
+        btn_row = ctk.CTkFrame(right)
+        btn_row.pack(fill="x", padx=10, pady=6)
+        self.desc_save_button = ctk.CTkButton(btn_row, text="Зберегти опис", command=self._save_desc_template)
+        self.desc_save_button.pack(side="right")
 
-        self._refresh_film_type_menu()
+        self.desc_cat_var = tk.StringVar(value="")
+
+        self._refresh_template_selectors()
 
     def _save_title_tags(self, show_message: bool = True):
         film = self._selected_film_type_key()
+        category_key = self._current_template_category
         title_value = self.title_box.get("1.0", "end").strip()
         tags_value = self.tags_box.get("1.0", "end").strip()
 
-        if film not in self.title_tags_templates:
-            self.title_tags_templates[film] = {}
-
-        self.title_tags_templates[film]["title_template"] = title_value
-        self.title_tags_templates[film]["tags_template"] = tags_value
+        self._set_title_tags_block(category_key, film, title_value, tags_value)
         save_title_tags_templates(self.title_tags_templates)
 
-        if film == "default":
+        if category_key is None and film == "default":
             self.templates["title_template"] = title_value
             self.templates["tags_template"] = tags_value
             save_templates(self.templates)
@@ -1612,50 +2332,52 @@ class App(ctk.CTk):
     def _load_title_tags_template(self):
         if not hasattr(self, "title_box") or not hasattr(self, "tags_box"):
             return
+        category = self._current_template_category
         film = self._selected_film_type_key()
-        title_template, tags_template = resolve_title_tags(self.title_tags_templates, self.templates, film)
+        title_template, tags_template = resolve_title_tags(self.title_tags_templates, self.templates, category, film)
         self.title_box.delete("1.0", "end")
         self.title_box.insert("1.0", title_template)
         self.tags_box.delete("1.0", "end")
         self.tags_box.insert("1.0", tags_template)
 
-    def _refresh_film_type_menu(self):
-        if not hasattr(self, "film_type_menu"):
+    def _on_template_scope_change(self, _selected_label=None):
+        if not hasattr(self, "template_category_var") or not hasattr(self, "template_film_var"):
             return
-        items = self._film_type_menu_items()
-        display_values = [label for label, _ in items]
-        self._film_type_display_to_key = {label: key for label, key in items}
-        self._film_type_key_to_display = {key: label for label, key in items}
-        self.film_type_menu.configure(values=display_values)
-
-        valid_keys = set(self._film_type_key_to_display.keys())
-        current_key = getattr(self, "_current_film_type_key", None)
-        if current_key not in valid_keys:
-            if len(items) > 1:
-                current_key = items[1][1]
-            else:
-                current_key = items[0][1]
-        self._current_film_type_key = current_key
-        current_display = self._film_type_key_to_display[current_key]
-        self.film_type_var.set(current_display)
-        self.film_type_menu.set(current_display)
-        self._on_film_type_change()
-
-    def _on_film_type_change(self, selected_label=None):
-        if selected_label is not None:
-            self._current_film_type_key = self._film_type_key_from_display(selected_label)
-        elif not getattr(self, "_current_film_type_key", None):
-            current_label = self.film_type_var.get() if hasattr(self, "film_type_var") else None
-            self._current_film_type_key = self._film_type_key_from_display(current_label)
+        category_label = self.template_category_var.get()
+        film_label = self.template_film_var.get()
+        category_key = self._template_category_label_to_key.get(category_label)
+        film_key = self._template_film_label_to_key.get(film_label, "default")
+        if not film_key:
+            film_key = "default"
+        self._current_template_category = category_key
+        self._current_film_type_key = film_key
+        if category_key and hasattr(self, "desc_cat_var"):
+            self._current_desc_category = category_key
+            self.desc_cat_var.set(category_key)
         self._load_title_tags_template()
         self._load_desc_template()
 
     def _load_desc_template(self):
-        if not hasattr(self, "desc_box") or not hasattr(self, "desc_cat_var"):
+        if not hasattr(self, "desc_box"):
             return
-        cat = self.desc_cat_var.get()
+        category = self._current_template_category
         film = self._selected_film_type_key()
-        descs = self.templates["descriptions"].get(cat, {})
+        if not category:
+            self.desc_box.configure(state="normal")
+            self.desc_box.delete("1.0", "end")
+            self.desc_box.insert("1.0", "Оберіть категорію, щоб редагувати опис.")
+            self.desc_box.configure(state="disabled")
+            if hasattr(self, "desc_save_button"):
+                self.desc_save_button.configure(state="disabled")
+            return
+
+        if hasattr(self, "desc_save_button"):
+            self.desc_save_button.configure(state="normal")
+        self.desc_box.configure(state="normal")
+        if hasattr(self, "desc_cat_var"):
+            self.desc_cat_var.set(category)
+        self._current_desc_category = category
+        descs = self.templates.get("descriptions", {}).get(category, {})
         if film == "default":
             txt = descs.get("default", "")
         else:
@@ -1668,12 +2390,201 @@ class App(ctk.CTk):
         self.desc_box.insert("1.0", txt)
 
     def _save_desc_template(self):
-        cat = self.desc_cat_var.get()
+        category = self._current_template_category or self.desc_cat_var.get()
+        if not category:
+            return show_error("Виберіть категорію для збереження опису.")
         film = self._selected_film_type_key()
         txt = self.desc_box.get("1.0", "end").strip()
-        self.templates["descriptions"].setdefault(cat, {})[film] = txt
+        self.templates.setdefault("descriptions", {}).setdefault(category, {})[film] = txt
         save_templates(self.templates)
         show_info("Шаблон опису збережено.")
+
+    # -------- Типи плівок
+    def _build_tab_filmtypes(self):
+        wrap = ctk.CTkFrame(self.tab_filmtypes)
+        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+        wrap.grid_columnconfigure(1, weight=1)
+        wrap.grid_rowconfigure(0, weight=1)
+
+        list_frame = ctk.CTkFrame(wrap)
+        list_frame.grid(row=0, column=0, sticky="ns", padx=(0, 10))
+        list_frame.grid_rowconfigure(0, weight=1)
+        list_frame.grid_columnconfigure(0, weight=1)
+
+        self.filmtype_tree = ttk.Treeview(
+            list_frame,
+            columns=("name", "enabled"),
+            show="headings",
+            selectmode="browse",
+            height=14,
+        )
+        self.filmtype_tree.heading("name", text="Назва")
+        self.filmtype_tree.heading("enabled", text="Увімкнено")
+        self.filmtype_tree.column("name", width=220, anchor="w")
+        self.filmtype_tree.column("enabled", width=90, anchor="center")
+        self.filmtype_tree.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.filmtype_tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        self.filmtype_tree.configure(yscrollcommand=y_scroll.set)
+        self.filmtype_tree.bind("<<TreeviewSelect>>", self._on_filmtype_select)
+
+        btn_frame = ctk.CTkFrame(list_frame)
+        btn_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ctk.CTkButton(btn_frame, text="Додати", command=self._filmtype_add).pack(side="left", padx=4)
+        ctk.CTkButton(btn_frame, text="Видалити", command=self._filmtype_delete).pack(side="left", padx=4)
+
+        detail = ctk.CTkFrame(wrap)
+        detail.grid(row=0, column=1, sticky="nsew")
+        detail.grid_rowconfigure(3, weight=1)
+
+        ctk.CTkLabel(detail, text="Назва").pack(anchor="w", padx=10, pady=(10, 0))
+        self.filmtype_name_entry = ctk.CTkEntry(detail, textvariable=self.filmtype_name_var)
+        self.filmtype_name_entry.pack(fill="x", padx=10, pady=(0, 8))
+
+        self.filmtype_enabled_check = ctk.CTkCheckBox(
+            detail,
+            text="Увімкнено за замовчуванням",
+            variable=self.filmtype_enabled_var,
+        )
+        self.filmtype_enabled_check.pack(anchor="w", padx=10, pady=(0, 8))
+
+        ctk.CTkButton(detail, text="Застосувати", command=self._filmtype_apply).pack(anchor="e", padx=10, pady=10)
+
+        self._refresh_filmtype_tree(select_index=0 if self.templates.get("film_types") else None)
+
+    def _refresh_filmtype_tree(self, select_index=None):
+        tree = getattr(self, "filmtype_tree", None)
+        if tree is None:
+            return
+        tree.delete(*tree.get_children())
+        film_types = self.templates.get("film_types", [])
+        for idx, item in enumerate(film_types):
+            name = (item.get("name") or "").strip()
+            enabled = "Так" if item.get("enabled", True) else "Ні"
+            tree.insert("", "end", iid=f"ft_{idx}", values=(name, enabled))
+        if select_index is not None and 0 <= select_index < len(film_types):
+            iid = f"ft_{select_index}"
+            if tree.exists(iid):
+                tree.selection_set(iid)
+                tree.focus(iid)
+                tree.see(iid)
+                self._on_filmtype_select()
+        elif not film_types:
+            self._current_filmtype_index = None
+            self.filmtype_name_var.set("")
+            self.filmtype_enabled_var.set(True)
+
+    def _on_filmtype_select(self, _evt=None):
+        tree = getattr(self, "filmtype_tree", None)
+        if tree is None:
+            return
+        sel = tree.selection()
+        if not sel:
+            self._current_filmtype_index = None
+            self.filmtype_name_var.set("")
+            self.filmtype_enabled_var.set(True)
+            return
+        iid = sel[0]
+        parts = iid.split("_")
+        if len(parts) != 2:
+            return
+        try:
+            idx = int(parts[1])
+        except ValueError:
+            return
+        film_types = self.templates.get("film_types", [])
+        if idx < 0 or idx >= len(film_types):
+            return
+        self._current_filmtype_index = idx
+        item = film_types[idx]
+        self.filmtype_name_var.set(item.get("name", ""))
+        self.filmtype_enabled_var.set(bool(item.get("enabled", True)))
+
+    def _filmtype_add(self):
+        new_name = simpledialog.askstring("Новий тип плівки", "Введіть назву типу плівки:", parent=self)
+        if new_name is None:
+            return
+        new_name = new_name.strip()
+        if not new_name:
+            return show_error("Введіть назву типу плівки.")
+        existing = {((item.get("name") or "").strip().lower()) for item in self.templates.get("film_types", [])}
+        if new_name.lower() in existing:
+            return show_error("Тип плівки з такою назвою вже існує.")
+        self.templates.setdefault("film_types", []).append({"name": new_name, "enabled": True})
+        save_templates(self.templates)
+        if self._ensure_title_tags_film(new_name):
+            save_title_tags_templates(self.title_tags_templates)
+        self._refresh_filmtype_tree(select_index=len(self.templates.get("film_types", [])) - 1)
+        self._refresh_filmtype_checkboxes()
+        self._refresh_template_selectors()
+
+    def _filmtype_delete(self):
+        tree = getattr(self, "filmtype_tree", None)
+        if tree is None:
+            return
+        selection = list(tree.selection())
+        if not selection:
+            return show_error("Виберіть тип плівки.")
+        if not messagebox.askyesno("Підтвердження", "Видалити вибраний тип плівки?"):
+            return
+        indices = []
+        for iid in selection:
+            parts = iid.split("_")
+            if len(parts) != 2:
+                continue
+            try:
+                idx = int(parts[1])
+            except ValueError:
+                continue
+            indices.append(idx)
+        indices = sorted(set(indices), reverse=True)
+        removed_names = []
+        for idx in indices:
+            film_types = self.templates.get("film_types", [])
+            if 0 <= idx < len(film_types):
+                removed = film_types.pop(idx)
+                name = (removed.get("name") or "").strip()
+                if name:
+                    removed_names.append(name)
+        if removed_names:
+            save_templates(self.templates)
+            for name in removed_names:
+                self._remove_film_type_templates(name)
+                if self._current_film_type_key == name:
+                    self._current_film_type_key = "default"
+        self._current_filmtype_index = None
+        self.filmtype_name_var.set("")
+        self.filmtype_enabled_var.set(True)
+        self._refresh_filmtype_tree(select_index=None)
+        self._refresh_filmtype_checkboxes()
+        self._refresh_template_selectors()
+
+    def _filmtype_apply(self):
+        idx = self._current_filmtype_index
+        film_types = self.templates.get("film_types", [])
+        if idx is None or idx < 0 or idx >= len(film_types):
+            return show_error("Виберіть тип плівки.")
+        new_name = self.filmtype_name_var.get().strip()
+        if not new_name:
+            return show_error("Введіть назву типу плівки.")
+        for pos, item in enumerate(film_types):
+            if pos != idx and (item.get("name") or "").strip().lower() == new_name.lower():
+                return show_error("Тип плівки з такою назвою вже існує.")
+        old_name = film_types[idx].get("name", "")
+        film_types[idx]["name"] = new_name
+        film_types[idx]["enabled"] = bool(self.filmtype_enabled_var.get())
+        save_templates(self.templates)
+        if new_name != old_name:
+            self._rename_film_type(old_name, new_name)
+            if self._current_film_type_key == old_name:
+                self._current_film_type_key = new_name
+        self._ensure_title_tags_film(new_name)
+        save_title_tags_templates(self.title_tags_templates)
+        self._refresh_filmtype_tree(select_index=idx)
+        self._refresh_filmtype_checkboxes()
+        self._refresh_template_selectors()
+        show_info("Тип плівки оновлено.")
 
     # -------- Експортні поля
     def _build_tab_export(self):
@@ -1731,17 +2642,30 @@ class App(ctk.CTk):
         )
         self.export_field_enabled_check.pack(anchor="w", padx=10, pady=(0, 8))
 
-        ctk.CTkLabel(detail, text="Шаблон (Jinja2)").pack(anchor="w", padx=10, pady=(0, 4))
+        ctk.CTkLabel(detail, text="Шаблон (формула =IF(...) або Jinja2)").pack(anchor="w", padx=10, pady=(0, 4))
         self.export_field_template = ctk.CTkTextbox(detail, height=220)
-        self.export_field_template.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        self.export_field_template.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        self.export_field_template.bind("<<Modified>>", self._on_export_template_modified)
 
         hint_text = (
-            "Доступні змінні: {{ brand }}, {{ model }}, {{ category }}, {{ film_type }}, {{ title }}, {{ description }}, {{ tags }}, "
-            "{{ spec('Назва') }}, {{ specs['Ключ'] }}, {{ row_number }}, {{ now }}."
+            "Почніть рядок зі знаком '=' щоб використати формулу у стилі Google Sheets (аргументи через ';').\n"
+            "Без '=' шаблон рендериться через Jinja2. Доступні змінні: {{ brand }}, {{ model }}, {{ category }}, {{ film_type }}, "
+            "{{ title }}, {{ description }}, {{ tags }}, {{ spec('Назва') }}, {{ specs['Ключ'] }}, {{ row_number }}, {{ now }}."
         )
         ctk.CTkLabel(detail, text=hint_text, justify="left", anchor="w", wraplength=360).pack(
-            fill="x", padx=10, pady=(0, 8)
+            fill="x", padx=10, pady=(0, 4)
         )
+
+        self.export_template_status = ctk.CTkLabel(
+            detail,
+            text="",
+            justify="left",
+            anchor="w",
+            wraplength=360,
+            text_color="#888888",
+        )
+        self.export_template_status.pack(fill="x", padx=10, pady=(0, 8))
+        self._update_template_status("")
 
         action_row = ctk.CTkFrame(detail)
         action_row.pack(fill="x", padx=10, pady=(0, 10))
@@ -1782,6 +2706,7 @@ class App(ctk.CTk):
             self.export_apply_button.configure(state=state)
         if hasattr(self, "export_field_template"):
             self.export_field_template.configure(state="normal" if enabled else "disabled")
+        self._update_template_status()
 
     def _load_export_field_detail(self, index):
         if index is None or index < 0 or index >= len(self.export_fields):
@@ -1795,6 +2720,7 @@ class App(ctk.CTk):
                 self.export_field_template.configure(state="normal")
                 self.export_field_template.delete("1.0", "end")
                 self.export_field_template.configure(state="disabled")
+            self._update_template_status("")
             return
 
         self._export_selected_index = index
@@ -1811,6 +2737,8 @@ class App(ctk.CTk):
         self.export_field_template.configure(state="normal")
         self.export_field_template.delete("1.0", "end")
         self.export_field_template.insert("1.0", str(template))
+        self.export_field_template.edit_modified(False)
+        self._update_template_status(template)
 
     def _on_export_field_select(self, _event):
         if getattr(self, "_export_tree_updating", False):
@@ -1830,6 +2758,64 @@ class App(ctk.CTk):
         else:
             self._load_export_field_detail(idx)
 
+    def _on_export_template_modified(self, _event):
+        widget = getattr(self, "export_field_template", None)
+        if widget is None:
+            return
+        try:
+            modified = bool(widget.edit_modified())
+        except Exception:
+            modified = True
+        if not modified:
+            return
+        try:
+            widget.edit_modified(False)
+        except Exception:
+            pass
+        text = widget.get("1.0", "end").rstrip()
+        self._update_template_status(text)
+
+    def _update_template_status(self, template_text: str | None = None):
+        label = getattr(self, "export_template_status", None)
+        if label is None:
+            return
+        if template_text is None:
+            widget = getattr(self, "export_field_template", None)
+            if widget is None:
+                template_text = ""
+            else:
+                template_text = widget.get("1.0", "end").rstrip()
+        message, color = self._analyze_template_text(template_text)
+        label.configure(text=message, text_color=color)
+
+    def _analyze_template_text(self, template_text: str):
+        trimmed = template_text.strip()
+        if not trimmed:
+            return (
+                "Введіть формулу (=IF(...)) або шаблон Jinja2. Аргументи формули розділяйте ';'.",
+                "#888888",
+            )
+        if _looks_like_formula(trimmed):
+            try:
+                info = FormulaEngine.describe(trimmed)
+            except FormulaError as exc:
+                return (f"❌ Помилка формули: {exc}", "#c94a4a")
+            variables = sorted(info.get("variables", []))
+            if variables:
+                vars_text = ", ".join(variables)
+                hint = f"Змінні: {vars_text}"
+            else:
+                hint = "Змінні не використовуються."
+            return (f"✅ Формула валідна. {hint}", "#4c9a2a")
+        try:
+            Template(trimmed)
+        except TemplateError as exc:
+            return (f"❌ Помилка шаблону Jinja2: {exc}", "#c94a4a")
+        return (
+            "ℹ️ Використовується шаблон Jinja2. Доступні змінні: {{ brand }}, {{ model }}, {{ category }}, {{ film_type }}, {{ title }}, {{ description }}, {{ tags }}, {{ row_number }}, {{ now }}.",
+            "#888888",
+        )
+
     def _export_apply_detail(self, save_to_file: bool):
         idx = getattr(self, "_export_selected_index", None)
         if idx is None or idx < 0 or idx >= len(self.export_fields):
@@ -1842,6 +2828,23 @@ class App(ctk.CTk):
         template = self.export_field_template.get("1.0", "end").rstrip()
         enabled = bool(self.export_field_enabled_var.get())
 
+        trimmed_template = template.strip()
+        if trimmed_template:
+            if _looks_like_formula(trimmed_template):
+                try:
+                    FormulaEngine.describe(trimmed_template)
+                except FormulaError as exc:
+                    show_error(f"Помилка у формулі: {exc}")
+                    self._update_template_status(template)
+                    return False
+            else:
+                try:
+                    Template(trimmed_template)
+                except TemplateError as exc:
+                    show_error(f"Помилка у шаблоні Jinja2: {exc}")
+                    self._update_template_status(template)
+                    return False
+
         changed = False
         if field.get("field") != name:
             field["field"] = name
@@ -1852,6 +2855,8 @@ class App(ctk.CTk):
         if bool(field.get("enabled")) != enabled:
             field["enabled"] = enabled
             changed = True
+
+        self._update_template_status(template)
 
         if changed:
             self._refresh_export_fields_tree(select_index=idx)
@@ -1965,10 +2970,14 @@ class App(ctk.CTk):
         fmt_frame = ctk.CTkFrame(right)
         fmt_frame.pack(fill="x", padx=10, pady=(6, 6))
         ctk.CTkLabel(fmt_frame, text="Формат експорту:").pack(anchor="w", padx=6, pady=(4, 4))
-        self.export_fmt_var = tk.StringVar(value="Excel (.xlsx)")
+        export_formats = get_available_export_formats()
+        if not export_formats:
+            export_formats = ["JSON (.json)"]
+        default_format = export_formats[0]
+        self.export_fmt_var = tk.StringVar(value=default_format)
         self.export_fmt_menu = ctk.CTkOptionMenu(
             fmt_frame,
-            values=["Excel (.xlsx)", "CSV (.csv)", "JSON (.json)"],
+            values=export_formats,
             variable=self.export_fmt_var,
             width=200,
         )
@@ -1991,6 +3000,12 @@ class App(ctk.CTk):
 
         action_row = ctk.CTkFrame(right)
         action_row.pack(fill="x", padx=10, pady=(6, 0))
+        ctk.CTkButton(
+            action_row,
+            text="Попередній перегляд",
+            command=self._preview_generation,
+            height=36,
+        ).pack(side="right", padx=6)
         ctk.CTkButton(action_row, text="Згенерувати", command=self._generate, height=36).pack(side="right", padx=6)
 
         progress_frame = ctk.CTkFrame(right)
@@ -2251,11 +3266,98 @@ class App(ctk.CTk):
             var = tk.BooleanVar(value=bool(item.get("enabled", True)))
             ctk.CTkCheckBox(self.filmtype_frame, text=item["name"], variable=var).pack(side="left", padx=6, pady=2)
             self.ft_vars.append((item["name"], var))
-        self._refresh_film_type_menu()
+        self._refresh_template_selectors()
 
     def _choose_folder(self):
         folder = filedialog.askdirectory(title="Виберіть папку для файлів")
         if folder: self.out_folder_var.set(folder)
+
+    def _preview_generation(self):
+        # оновити шаблони/поля перед переглядом
+        self._save_title_tags(show_message=False)
+        self._export_apply_detail(save_to_file=False)
+
+        selected_types = [name for name, var in self.ft_vars if var.get()]
+        if not selected_types:
+            return show_error("Оберіть хоча б один тип плівки.")
+
+        for name, var in self.ft_vars:
+            for item in self.templates["film_types"]:
+                if item["name"] == name:
+                    item["enabled"] = bool(var.get())
+                    break
+        save_templates(self.templates)
+
+        selected_models = sorted(self._collect_checked_model_ids())
+
+        try:
+            if selected_models:
+                records, columns = generate_export_rows(
+                    selected_types,
+                    self.templates,
+                    self.title_tags_templates,
+                    self.export_fields,
+                    model_ids=selected_models,
+                )
+            else:
+                records, columns = generate_export_rows(
+                    selected_types,
+                    self.templates,
+                    self.title_tags_templates,
+                    self.export_fields,
+                )
+        except ValueError as err:
+            return show_error(str(err))
+
+        if not records:
+            return show_error("Немає даних для генерації (перевірте моделі).")
+
+        preview_limit = 20
+        preview_records = list(islice(records, preview_limit))
+
+        if getattr(self, "_preview_window", None) is not None:
+            try:
+                if self._preview_window.winfo_exists():
+                    self._preview_window.destroy()
+            except Exception:
+                pass
+
+        preview_window = ctk.CTkToplevel(self)
+        preview_window.title("Попередній перегляд генерації")
+        preview_window.geometry("960x480")
+        self._preview_window = preview_window
+
+        info_text = f"Показано перші {len(preview_records)} з {len(records)} рядків."
+        ctk.CTkLabel(preview_window, text=info_text, anchor="w").pack(fill="x", padx=14, pady=(12, 4))
+
+        table_frame = ctk.CTkFrame(preview_window)
+        table_frame.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        table_frame.grid_columnconfigure(0, weight=1)
+        table_frame.grid_rowconfigure(0, weight=1)
+
+        column_ids = [f"preview_col_{idx}" for idx in range(len(columns))]
+        tree = ttk.Treeview(table_frame, columns=column_ids, show="headings")
+        tree.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        for col_id, header in zip(column_ids, columns):
+            tree.heading(col_id, text=header)
+            tree.column(col_id, anchor="w", stretch=True, width=160)
+
+        for record in preview_records:
+            values = _row_to_values(record, columns)
+            tree.insert("", "end", values=values)
+
+        if len(records) > preview_limit:
+            note = f"(Доступно більше рядків: всього {len(records)}.)"
+            ctk.CTkLabel(preview_window, text=note, anchor="w").pack(fill="x", padx=14, pady=(0, 10))
+
+        ctk.CTkButton(preview_window, text="Закрити", command=preview_window.destroy).pack(pady=(0, 12))
 
     def _generate(self):
         self._progress_reset("Підготовка...")
