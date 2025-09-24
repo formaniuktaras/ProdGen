@@ -46,6 +46,25 @@ OPENPYXL_INSTALL_HINT = (
     "Встановіть бібліотеку командою 'pip install openpyxl' і перезапустіть застосунок, щоб увімкнути цей формат."
 )
 
+
+def _show_dependency_error(message: str) -> None:
+    """Display a blocking error for a missing runtime dependency."""
+
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(APP_TITLE, message)
+    except Exception:
+        print(message, file=sys.stderr)
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
 try:
     import customtkinter as ctk
 except ModuleNotFoundError:
@@ -55,72 +74,14 @@ except ModuleNotFoundError:
     )
     sys.exit(1)
 
-PANDAS_IMPORT_ERROR_DETAIL = ""
-PANDAS_EXPORT_BLOCKED_MESSAGE = ""
-EXCEL_ENGINE_IMPORT_ERROR_DETAIL = ""
-EXCEL_EXPORT_BLOCKED_MESSAGE = ""
-
 try:
     import pandas as pd
-except ModuleNotFoundError as exc:
-    pd = None
-    PANDAS_IMPORT_ERROR_DETAIL = str(exc)
-    PANDAS_EXPORT_BLOCKED_MESSAGE = (
-        "Експорт у формат Excel (.xlsx) недоступний: бібліотека pandas не встановлена."
+except ModuleNotFoundError:
+    _show_dependency_error(
+        "Бібліотека pandas не знайдена.\n"
+        "Встановіть її командою 'pip install pandas' і перезапустіть застосунок."
     )
-except ImportError as exc:  # e.g. missing binary dependencies
-    pd = None
-    PANDAS_IMPORT_ERROR_DETAIL = str(exc)
-    PANDAS_EXPORT_BLOCKED_MESSAGE = (
-        "Експорт у формат Excel (.xlsx) недоступний: не вдалося завантажити бібліотеку pandas."
-    )
-else:
-    PANDAS_IMPORT_ERROR_DETAIL = ""
-    PANDAS_EXPORT_BLOCKED_MESSAGE = ""
-
-if PANDAS_EXPORT_BLOCKED_MESSAGE:
-    detail_suffix = f"\nДеталі: {PANDAS_IMPORT_ERROR_DETAIL}" if PANDAS_IMPORT_ERROR_DETAIL else ""
-    DEPENDENCY_WARNINGS.append(
-        PANDAS_EXPORT_BLOCKED_MESSAGE
-        + detail_suffix
-        + "\n"
-        + PANDAS_INSTALL_HINT
-        + CSV_JSON_FALLBACK_NOTE
-    )
-else:
-    PANDAS_IMPORT_ERROR_DETAIL = ""
-
-if pd is None:
-    EXCEL_EXPORT_BLOCKED_MESSAGE = PANDAS_EXPORT_BLOCKED_MESSAGE
-else:
-    try:
-        import openpyxl  # noqa: F401  # type: ignore[import-not-found]
-    except ModuleNotFoundError as exc:
-        EXCEL_ENGINE_IMPORT_ERROR_DETAIL = str(exc)
-        EXCEL_EXPORT_BLOCKED_MESSAGE = (
-            "Експорт у формат Excel (.xlsx) недоступний: бібліотека openpyxl не встановлена."
-        )
-    except ImportError as exc:
-        EXCEL_ENGINE_IMPORT_ERROR_DETAIL = str(exc)
-        EXCEL_EXPORT_BLOCKED_MESSAGE = (
-            "Експорт у формат Excel (.xlsx) недоступний: не вдалося завантажити бібліотеку openpyxl."
-        )
-
-if EXCEL_EXPORT_BLOCKED_MESSAGE and pd is not None:
-    detail_suffix = (
-        f"\nДеталі: {EXCEL_ENGINE_IMPORT_ERROR_DETAIL}"
-        if EXCEL_ENGINE_IMPORT_ERROR_DETAIL
-        else ""
-    )
-    DEPENDENCY_WARNINGS.append(
-        EXCEL_EXPORT_BLOCKED_MESSAGE
-        + detail_suffix
-        + "\n"
-        + OPENPYXL_INSTALL_HINT
-        + CSV_JSON_FALLBACK_NOTE
-    )
-else:
-    EXCEL_ENGINE_IMPORT_ERROR_DETAIL = ""
+    sys.exit(1)
 
 try:
     from jinja2 import Template, TemplateError
